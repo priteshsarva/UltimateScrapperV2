@@ -1,0 +1,538 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CollectionsExport API",
+    "version": "1.0.0",
+    "description": "This is the OpenAPI specification for the CollectionsExport API collection."
+  },
+  "paths": {
+    "http://localhost:5000/product/allresults": {
+      "get": [
+        {
+          "summary": "http://localhost:5000/product/allresults",
+          "operationId": "http://localhost:5000/product/allresults",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {}
+        }
+      ]
+    },
+    "http://localhost:5000/product/add": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/product/add",
+          "operationId": "http://localhost:5000/product/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\r\n    \"sizeName\":[4e2],\r\n    \"catName\":\"dssaj\",\r\n   \"productName\" : \"NOT NULL\",\r\n    \"productLastUpdated\": \"DATETIME DEFAULT CURRENT_TIMESTAMP\",\r\n    \"productPrice\":8885,\r\n    \"productPriceWithoutDiscount\" :54548,\r\n    \"productOriginalPrice\": 57487,\r\n    \"productFetchedFrom\": \"test\",\r\n    \"ProductUrl\": \"TEXT\",\r\n    \"productShortDescription\": \"TEXT\",\r\n    \"productDescription\": \"TEXT\",\r\n    \"productBrand\": \"TEXT\"\r\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/product/update": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/category/update",
+          "operationId": "http://localhost:5000/category/update",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"productId\":2,\n  \"productName\":\"slippersdsd234\",\n  \"productBrand\":\"tchdytdsikd\"\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/product/delete": {
+      "delete": [
+        {
+          "summary": "http://localhost:5000/category/add Copy Copy",
+          "operationId": "http://localhost:5000/category/addCopyCopy",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"productId\":1\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/tag/allresults": {
+      "get": [
+        {
+          "summary": "http://localhost:5000/size/allresults",
+          "operationId": "http://localhost:5000/size/allresults",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {}
+        },
+        {
+          "summary": "http://localhost:5000/tags/allresults",
+          "operationId": "http://localhost:5000/tags/allresults",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {}
+        }
+      ]
+    },
+    "http://localhost:5000/size/add": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/size/add",
+          "operationId": "http://localhost:5000/size/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"sizeName\": \"B\"\n}"
+              }
+            }
+          }
+        },
+        {
+          "summary": "http://localhost:5000/size/add",
+          "operationId": "http://localhost:5000/size/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"sizeName\": \"B\"\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/size/update": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/size/update",
+          "operationId": "http://localhost:5000/size/update",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"sizeId\": 1,\n  \"sizeName\": \"G\"\n}"
+              }
+            }
+          }
+        },
+        {
+          "summary": "http://localhost:5000/size/update",
+          "operationId": "http://localhost:5000/size/update",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"sizeId\": 1,\n  \"sizeName\": \"G\"\n}"
+              }
+            }
+          }
+        },
+        {
+          "summary": "http://localhost:5000/size/update",
+          "operationId": "http://localhost:5000/size/update",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"sizeId\": 1,\n  \"sizeName\": \"G\"\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/size/delete": {
+      "delete": [
+        {
+          "summary": "http://localhost:5000/size/add",
+          "operationId": "http://localhost:5000/size/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n    \"sizeId\": 1\n}"
+              }
+            }
+          }
+        },
+        {
+          "summary": "http://localhost:5000/size/add",
+          "operationId": "http://localhost:5000/size/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n    \"sizeId\": 1\n}"
+              }
+            }
+          }
+        },
+        {
+          "summary": "http://localhost:5000/size/add",
+          "operationId": "http://localhost:5000/size/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n    \"sizeId\": 1\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/category/allresults": {
+      "get": [
+        {
+          "summary": "http://localhost:5000/category/allresults",
+          "operationId": "http://localhost:5000/category/allresults",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {}
+        }
+      ]
+    },
+    "http://localhost:5000/category/add": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/category/add",
+          "operationId": "http://localhost:5000/category/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"catName\":\"slippers\",\n  \"catImg\":\"shoes.js\",\n  \"catSlug\":\"/slipperssqq3\"\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/category/update": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/category/add Copy",
+          "operationId": "http://localhost:5000/category/addCopy",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"catId\":1,\n  \"catName\":\"slippersdsd\",\n  \"catImg\":\"shoes.js\",\n  \"catSlug\":\"/slippers\"\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/category/delete": {
+      "delete": [
+        {
+          "summary": "http://localhost:5000/category/add Copy Copy",
+          "operationId": "http://localhost:5000/category/addCopyCopy",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/graphql": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\n  \"catId\":1\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/productsize/allresults": {
+      "get": [
+        {
+          "summary": "http://localhost:5000/size/allresults",
+          "operationId": "http://localhost:5000/size/allresults",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {}
+        }
+      ]
+    },
+    "http://localhost:5000/vendor/allresults": {
+      "get": [
+        {
+          "summary": "http://localhost:5000/vendor/allresults",
+          "operationId": "http://localhost:5000/vendor/allresults",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {}
+        }
+      ]
+    },
+    "http://localhost:5000/vendor/add": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/vendor/add",
+          "operationId": "http://localhost:5000/vendor/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\r\n  \"vendorName\": \"B\",\r\n  \"vendorWebsiteUrl\":\"www.google.com\"\r\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/tag/add": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/tagss/add",
+          "operationId": "http://localhost:5000/tagss/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\r\n  \"tagName\": \"B\"\r\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/tag/update": {
+      "post": [
+        {
+          "summary": "http://localhost:5000/tags/update",
+          "operationId": "http://localhost:5000/tags/update",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\r\n  \"tagId\": 3,\r\n  \"tagName\": \"G\"\r\n}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "http://localhost:5000/tag/delete": {
+      "delete": [
+        {
+          "summary": "http://localhost:5000/tags/add",
+          "operationId": "http://localhost:5000/tags/add",
+          "responses": {
+            "200": {
+              "description": "Successful response"
+            }
+          },
+          "requestBody": {
+            "description": "Imported from Thunder Client",
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "example": "{\r\n    \"tagId\": 1\r\n}"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
