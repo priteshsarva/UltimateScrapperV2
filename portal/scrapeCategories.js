@@ -9,11 +9,11 @@ import "dotenv/config";
 puppeteer.use(StealthPlugin());
 
 const LAUNCH = {
-  headless: "new",
+  headless: false,
   executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
   args: [
     "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-    "--disable-gpu", "--no-zygote", "--single-process",
+    "--disable-gpu",
   ],
 };
 
@@ -21,6 +21,7 @@ async function withPage(fn) {
   const browser = await puppeteer.launch(LAUNCH);
   try {
     const page = await browser.newPage();
+    await page.setDefaultNavigationTimeout(45000);
     await page.setRequestInterception(true);
     page.on("request", (r) =>
       ["image", "stylesheet", "font", "media"].includes(r.resourceType()) ? r.abort() : r.continue()
@@ -37,14 +38,17 @@ const clean = (b) => String(b || "").replace(/\/+$/, "");
 export async function scrapeCategoriesA(baseUrl) {
   const url = `${clean(baseUrl)}/allcategory.html`;
   return withPage(async (page) => {
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
     return page.evaluate(() =>
       Array.from(document.querySelectorAll(".cat-area"))
-        .map((el) => ({
-          name: (el.querySelector(".cat-text")?.innerText || "").trim(),
-          slug: el.querySelector("a")?.getAttribute("href") || null,
-          img: el.querySelector("img")?.src || null,
-        }))
+        .map((el) => {
+          const a = el.querySelector("a");
+          return {
+            name: (el.querySelector(".cat-text")?.innerText || "").trim(),
+            slug: (a && a.getAttribute("href")) ? a.href : null, // absolute, source's own domain
+            img: el.querySelector("img")?.src || null,
+          };
+        })
         .filter((c) => c.name)
     );
   });
@@ -54,14 +58,18 @@ export async function scrapeCategoriesA(baseUrl) {
 export async function scrapeCategoriesB(baseUrl) {
   const url = `${clean(baseUrl)}/categories`;
   return withPage(async (page) => {
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
     return page.evaluate(() =>
       Array.from(document.querySelectorAll("div.abs_image_wrapper"))
-        .map((el) => ({
-          name: (el.querySelector("img")?.getAttribute("alt") || "").trim(),
-          slug: el.querySelector("a")?.getAttribute("href") || null,
-          img: el.querySelector("img")?.src || null,
-        }))
+        .map((el) => {
+          const a = el.querySelector("a");
+          const im = el.querySelector("img");
+          return {
+            name: (im?.getAttribute("alt") || "").trim(),
+            slug: (a && a.getAttribute("href")) ? a.href : null, // absolute, source's own domain
+            img: im?.src || null,
+          };
+        })
         .filter((c) => c.name)
     );
   });

@@ -41,16 +41,31 @@ async function readCategoriesFromDB(source) {
         GROUP BY catName`,
       [source.search_key]
     );
-    // best-effort img/slug from the CATEGORIES table, matched by name
-    // (CATEGORIES is globally deduped, so these are cosmetic; mode=scrape gets exact per-source)
-    const meta = await allAsync(db, `SELECT catName, catImg, catSlug FROM CATEGORIES`);
-    const metaMap = new Map(meta.map((m) => [m.catName, { img: m.catImg || null, slug: m.catSlug || null }]));
-    return rows.map((r) => ({
-      name: r.name,
-      count: r.c,
-      img: metaMap.get(r.name)?.img || null,
-      slug: metaMap.get(r.name)?.slug || null,
-    }));
+    // name + count only. slug/img are NOT taken from the CATEGORIES table because
+    // that table is globally deduped (it would borrow another source's slug/img).
+    // Accurate slug/img come from the live category-page scrape instead.
+    return rows.map((r) => ({ name: r.name, count: r.c }));
+  } finally {
+    await closeAsync(db);
+  }
+}
+
+// per-source { catName -> product_count }, for merging into live-scraped categories
+async function readCategoryCounts(source) {
+  const db = await openReadonly(source.category);
+  try {
+    const rows = await allAsync(
+      db,
+      `SELECT catName AS name, COUNT(*) AS c
+         FROM PRODUCTS
+        WHERE productFetchedFrom LIKE '%' || ? || '%'
+          AND catName IS NOT NULL
+          AND TRIM(catName) <> ''
+          AND catName NOT LIKE '%,%'
+        GROUP BY catName`,
+      [source.search_key]
+    );
+    return new Map(rows.map((r) => [r.name, r.c]));
   } finally {
     await closeAsync(db);
   }
@@ -93,7 +108,9 @@ export async function refreshAllSourceCategoriesFromDB() {
   return total;
 }
 
-// New source (categories-first on approval): live-scrape the category page.
+// New source (categories-first on approval) and the accurate fix for existing
+// sources: live-scrape the category page (headless Chrome) for exact per-source
+// name + slug + img, then merge in product counts from the DB.
 export async function scrapeSourceCategories(source) {
   let cats = [];
   if (source.method === "METHOD_A") cats = await scrapeCategoriesA(source.base_url);
@@ -101,7 +118,15 @@ export async function scrapeSourceCategories(source) {
 
   const seen = new Set();
   cats = cats.filter((c) => c.name && !seen.has(c.name) && seen.add(c.name));
-  await upsertCategories(source.id, cats, { withCount: false });
+
+  // accurate per-source counts from the DB, matched by catName
+  let counts = new Map();
+  try { counts = await readCategoryCounts(source); } catch (_) { /* no products yet */ }
+  cats = cats.map((c) => ({ ...c, count: counts.get(c.name) || 0 }));
+
+  // withCount:true so counts are written and the scraped slug/img overwrite
+  // any stale/contaminated values from an earlier DB-read populate.
+  await upsertCategories(source.id, cats, { withCount: true });
   return cats.length;
 }
 

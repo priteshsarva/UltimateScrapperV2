@@ -109,4 +109,19 @@ adminRouter.post("/:id/reject", async (req, res) => {
   res.json({ ok: true });
 });
 
+// POST /portal/admin/scrape-requests/:id/resolve
+// Close a request WITHOUT creating a source (e.g. the site is already a source).
+adminRouter.post("/:id/resolve", async (req, res) => {
+  const { rows } = await query(
+    `update scrape_requests set status='approved', decided_at=now() where id=$1 returning site_url`,
+    [req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: "Not found" });
+  await query(
+    `insert into audit_log (actor, action, target) values ($1,'Resolved scrape request (no source created)',$2)`,
+    [req.user.email, rows[0].site_url]
+  );
+  res.json({ ok: true });
+});
+
 export { clientRouter as scrapeRequestRoutes, adminRouter as adminScrapeRequestRoutes };

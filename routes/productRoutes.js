@@ -250,35 +250,39 @@ router.get('/allresults', async (req, res) => {
 
 router.get('/sync-feed', requireEnrollmentKey, async (req, res) => {
   try {
-    const by    = req.query.by === 'ts' ? 'ts' : 'id';     // 'id' = new, 'ts' = updated
+    const by    = req.query.by === 'ts' ? 'ts' : 'id';
     const after = parseInt(req.query.after) || 0;
     const limit = Math.min(parseInt(req.query.limit) || 50, 200);
 
-    // Scope comes from the enrollment key, not a tenant config.
-    const { sourceCategory, searchKey, categories } = req.enrollment;
+    // All sources on this enrollment share one category DB (enforced when adding).
+    const dbName  = req.enrollment.sources[0].sourceCategory;
+    const sources = req.enrollment.sources.filter(s => s.sourceCategory === dbName);
 
-    const db  = await dbManager.getDb(sourceCategory);   // live DB only (shoes/watches)
+    const db  = await dbManager.getDb(dbName);          // live DB only
     const col = by === 'ts' ? 'CAST(productLastUpdated AS INTEGER)' : 'productId';
 
-    // base: this source's rows, keyset-paginated
-    const params = [];
-    let where = `${col} > ? AND productFetchedFrom LIKE '%' || ? || '%'`;
-    params.push(after, searchKey);
+    const params = [after];
 
-    // category allow-list (skip filter if the client picked nothing yet)
-    if (Array.isArray(categories) && categories.length) {
-      const placeholders = categories.map(() => '?').join(',');
-      where += ` AND catName IN (${placeholders})`;
-      params.push(...categories);
-    }
+    // per-source scope: (fetchedFrom LIKE key AND catName IN picked) OR (next source) ...
+    const orClauses = sources.map(s => {
+      let c = `productFetchedFrom LIKE '%' || ? || '%'`;
+      params.push(s.searchKey);
+      if (Array.isArray(s.categories) && s.categories.length) {
+        c += ` AND catName IN (${s.categories.map(() => '?').join(',')})`;
+        params.push(...s.categories);
+      }
+      return `(${c})`;
+    });
 
-    const sql = `SELECT * FROM PRODUCTS WHERE ${where} ORDER BY ${col} ASC LIMIT ?`;
+    const sql = `SELECT * FROM PRODUCTS
+                 WHERE ${col} > ? AND (${orClauses.join(' OR ')})
+                 ORDER BY ${col} ASC LIMIT ?`;
     params.push(limit);
 
     const rows = await new Promise((resolve, reject) => {
       db.all(sql, params, (e, r) => e ? reject(e) : resolve(r || []));
     });
-    rows.forEach(r => r.dbName = sourceCategory);   // so the plugin knows the source DB
+    rows.forEach(r => r.dbName = dbName);
 
     res.json({ by, after, count: rows.length, results: rows });
   } catch (e) {

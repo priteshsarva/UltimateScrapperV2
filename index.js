@@ -22,7 +22,7 @@ import { nextSourceToScrape } from './portal/sources.js';
 import { enqueueScrape } from './portal/scrapeQueue.js';
 import { scrapeRequestRoutes, adminScrapeRequestRoutes } from "./portal/scrapeRequestRoutes.js";
 import { sourceCategoryRoutes, adminSourceCategoryRoutes } from "./portal/categoryRoutes.js";
-
+import enrollmentSourceRoutes from "./portal/enrollmentSourceRoutes.js";
 
 // const PORT = process.env.PORT || 5000;
 const PORT = 3002; // Force port 3002 for production behind Cloudflare
@@ -120,6 +120,8 @@ app.use("/portal/admin/scrape-requests", adminScrapeRequestRoutes);
 app.use("/portal/admin/sources", sourceRoutes);
 app.use("/portal/sources", sourceCategoryRoutes);              // GET /portal/sources/:id/categories
 app.use("/portal/admin/sources", adminSourceCategoryRoutes);  // alongside the existing sourceRoutes
+app.use("/portal", enrollmentSourceRoutes);
+
 app.options('*', cors()); // Handle preflight requests for all routes
 
 app.get('/', async (req, res) => {

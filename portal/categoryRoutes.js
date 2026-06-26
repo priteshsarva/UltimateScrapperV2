@@ -3,7 +3,7 @@
 //  admin : list all (incl disabled), toggle enabled, re-refresh on demand
 import { Router } from "express";
 import { requireAuth, requireAdmin } from "./auth.js";
-import { getSource } from "./sources.js";
+import { getSource, listSources } from "./sources.js";
 import {
   listSourceCategories, setCategoryEnabled,
   refreshSourceCategoriesFromDB, scrapeSourceCategories,
@@ -12,6 +12,19 @@ import {
 // ---------- client ----------
 const clientRouter = Router();
 clientRouter.use(requireAuth);
+
+// GET /portal/sources  -> active sources (for the enroll / add-source picker)
+clientRouter.get("/", async (req, res) => {
+  try {
+    const all = await listSources({});
+    const sources = all
+      .filter((s) => s.status === "active")
+      .map((s) => ({ id: s.id, name: s.name, category: s.category }));
+    res.json({ sources });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // GET /portal/sources/:id/categories  -> enabled categories to choose from
 clientRouter.get("/:id/categories", async (req, res) => {
