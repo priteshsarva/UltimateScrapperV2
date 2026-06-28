@@ -18,7 +18,7 @@ export async function requireEnrollmentKey(req, res, next) {
     if (!key) return res.status(401).json({ error: "Missing enrollment key" });
 
     const enr = (await query(
-      `select id, user_id, domain, status, expiry_date
+      `select id, user_id, domain, status, expiry_date, last_mismatch_domain
          from enrollments where enrollment_key = $1`,
       [key]
     )).rows[0];
@@ -39,9 +39,26 @@ export async function requireEnrollmentKey(req, res, next) {
     // Enforced when the header is present; if absent, allowed unless STRICT_DOMAIN_LOCK=true.
     const sentDomain = req.headers["x-site-domain"];
     if (sentDomain) {
-      if (normDomain(sentDomain) !== normDomain(enr.domain)) {
+      const sent = normDomain(sentDomain);
+      if (sent !== normDomain(enr.domain)) {
+        // record the offending domain; audit only when it's a newly-seen domain (no spam)
+        try {
+          if (enr.last_mismatch_domain !== sent) {
+            await query(
+              `insert into audit_log (actor, action, target)
+               values ($1,'Key used from unrecognized domain',$2)`,
+              [enr.domain, sent]
+            );
+          }
+          await query(
+            `update enrollments set last_mismatch_domain=$1, last_mismatch_at=now() where id=$2`,
+            [sent, enr.id]
+          );
+        } catch (e) { /* tracking must never break the gate */ }
         return res.status(403).json({ error: "This key is locked to a different domain." });
       }
+      // legit use — remember the domain it's being used from
+      query(`update enrollments set last_seen_domain=$1, last_seen_at=now() where id=$2`, [sent, enr.id]).catch(() => {});
     } else if (STRICT_DOMAIN) {
       return res.status(403).json({ error: "Missing site domain." });
     }

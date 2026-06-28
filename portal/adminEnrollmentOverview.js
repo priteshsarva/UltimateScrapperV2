@@ -13,7 +13,9 @@ router.get("/enrollment-overview", async (req, res) => {
   try {
     const enrs = (await query(
       `select e.id, e.domain, e.status, e.expiry_date, e.renewal_date, e.last_sync_at,
-              e.enrollment_key, u.email as owner_email
+              e.enrollment_key, e.last_seen_domain, e.last_seen_at,
+              e.last_mismatch_domain, e.last_mismatch_at,
+              u.email as owner_email
          from enrollments e
          left join users u on u.id = e.user_id
         order by e.expiry_date asc nulls last`

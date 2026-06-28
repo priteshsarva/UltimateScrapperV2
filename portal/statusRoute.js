@@ -13,13 +13,42 @@ import { query } from "./db.js";
 
 const router = Router();
 
+function normDomain(d) {
+  if (!d) return "";
+  let h = String(d).trim().toLowerCase();
+  h = h.replace(/^https?:\/\//, "").replace(/^www\./, "");
+  h = h.split("/")[0].split(":")[0];
+  return h;
+}
+
 async function enrollmentByKey(key) {
   if (!key) return null;
   return (await query(
-    `select id, domain, status, expiry_date, renewal_date, last_sync_at
+    `select id, domain, status, expiry_date, renewal_date, last_sync_at, last_mismatch_domain
        from enrollments where enrollment_key = $1`,
     [key]
   )).rows[0] || null;
+}
+
+// record where the key is being used from (mirrors the sync-feed gate)
+async function trackDomain(enr, sent) {
+  if (!sent) return true;
+  const ok = sent === normDomain(enr.domain);
+  if (ok) {
+    query(`update enrollments set last_seen_domain=$1, last_seen_at=now() where id=$2`, [sent, enr.id]).catch(() => {});
+  } else {
+    try {
+      if (enr.last_mismatch_domain !== sent) {
+        await query(
+          `insert into audit_log (actor, action, target)
+           values ($1,'Key used from unrecognized domain',$2)`,
+          [enr.domain, sent]
+        );
+      }
+      await query(`update enrollments set last_mismatch_domain=$1, last_mismatch_at=now() where id=$2`, [sent, enr.id]);
+    } catch (e) { /* never break status on tracking */ }
+  }
+  return ok;
 }
 
 // GET /product/status  -> status, expiry, days_left, and the enrolled sources
@@ -27,6 +56,10 @@ router.get("/status", async (req, res) => {
   try {
     const enr = await enrollmentByKey(req.headers["x-enrollment-key"]);
     if (!enr) return res.status(401).json({ error: "Invalid enrollment key" });
+
+    // record + check the calling domain (does not block; the plugin shows the message)
+    const sent = normDomain(req.headers["x-site-domain"]);
+    const domain_ok = sent ? await trackDomain(enr, sent) : true;
 
     const sources = (await query(
       `select es.source_id, es.categories, s.name, s.category
@@ -43,6 +76,8 @@ router.get("/status", async (req, res) => {
 
     res.json({
       domain: enr.domain,
+      registered_domain: enr.domain,
+      domain_ok,
       status: enr.status,
       expiry_date: enr.expiry_date,
       renewal_date: enr.renewal_date,
