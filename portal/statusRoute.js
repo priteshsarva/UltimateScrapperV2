@@ -62,7 +62,7 @@ router.get("/status", async (req, res) => {
     const domain_ok = sent ? await trackDomain(enr, sent) : true;
 
     const sources = (await query(
-      `select es.source_id, es.categories, s.name, s.category
+      `select es.source_id, es.categories, s.name, s.category, s.search_key
          from enrollment_sources es
          join sources s on s.id = es.source_id
         where es.enrollment_id = $1
