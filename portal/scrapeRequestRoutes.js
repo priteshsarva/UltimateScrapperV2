@@ -12,16 +12,31 @@ import { scrapeSourceCategories, refreshSourceCategoriesFromDB } from "./categor
 const clientRouter = Router();
 clientRouter.use(requireAuth);
 
-// POST /portal/scrape-requests   { site_url, category }
+// POST /portal/scrape-requests   { site_url, category, enrollment_id? }
+// enrollment_id ties the request to the store that asked; approval auto-attaches.
 clientRouter.post("/", async (req, res) => {
-  const { site_url, category } = req.body || {};
+  const { site_url, category, enrollment_id } = req.body || {};
   if (!site_url || !category)
     return res.status(400).json({ error: "site_url and category required" });
+
+  // if a target store is given, it must belong to this user and match the category
+  if (enrollment_id) {
+    const enr = (await query(`select id, user_id from enrollments where id=$1`, [enrollment_id])).rows[0];
+    if (!enr || enr.user_id !== req.user.sub) return res.status(404).json({ error: "Enrollment not found" });
+    const existing = (await query(
+      `select s.category from enrollment_sources es join sources s on s.id=es.source_id
+        where es.enrollment_id=$1 limit 1`, [enrollment_id]
+    )).rows[0];
+    if (existing && existing.category !== category) {
+      return res.status(400).json({ error: `That site sells ${existing.category}; this request is for ${category}.` });
+    }
+  }
+
   const { rows } = await query(
-    `insert into scrape_requests (user_id, site_url, category)
-     values ($1,$2,$3)
+    `insert into scrape_requests (user_id, site_url, category, enrollment_id)
+     values ($1,$2,$3,$4)
      returning id, site_url, category, status, created_at`,
-    [req.user.sub, site_url, category]
+    [req.user.sub, site_url, category, enrollment_id || null]
   );
   res.json({ request: rows[0] });
 });
@@ -77,6 +92,16 @@ adminRouter.post("/:id/approve", async (req, res) => {
     `insert into audit_log (actor, action, target) values ($1,'Approved scrape request',$2)`,
     [req.user.email, reqRow.site_url]
   );
+
+  // auto-attach the new source to the store that requested it (all categories by default)
+  if (reqRow.enrollment_id) {
+    await query(
+      `insert into enrollment_sources (enrollment_id, source_id, categories)
+       values ($1,$2,'{}')
+       on conflict (enrollment_id, source_id) do nothing`,
+      [reqRow.enrollment_id, source.id]
+    );
+  }
 
   // 2) categories-first: scrape just the category list now (so the client can pick)
   let categoriesFound = 0;

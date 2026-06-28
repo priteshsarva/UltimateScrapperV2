@@ -2,6 +2,16 @@
 // One key => one site => many sources (each with its own picked categories).
 import { query } from "./db.js";
 
+// strip protocol / www / path / port so "https://www.Stylenova.com/shop" -> "stylenova.com"
+function normDomain(d) {
+  if (!d) return "";
+  let h = String(d).trim().toLowerCase();
+  h = h.replace(/^https?:\/\//, "").replace(/^www\./, "");
+  h = h.split("/")[0].split(":")[0];
+  return h;
+}
+const STRICT_DOMAIN = process.env.STRICT_DOMAIN_LOCK === "true";
+
 export async function requireEnrollmentKey(req, res, next) {
   try {
     const key = req.headers["x-enrollment-key"];
@@ -23,6 +33,17 @@ export async function requireEnrollmentKey(req, res, next) {
     }
     if (enr.status !== "active") {
       return res.status(403).json({ error: `Enrollment ${enr.status}` });
+    }
+
+    // domain lock: the plugin sends its site domain; it must match the enrollment's.
+    // Enforced when the header is present; if absent, allowed unless STRICT_DOMAIN_LOCK=true.
+    const sentDomain = req.headers["x-site-domain"];
+    if (sentDomain) {
+      if (normDomain(sentDomain) !== normDomain(enr.domain)) {
+        return res.status(403).json({ error: "This key is locked to a different domain." });
+      }
+    } else if (STRICT_DOMAIN) {
+      return res.status(403).json({ error: "Missing site domain." });
     }
 
     // all sources on this enrollment
