@@ -4,6 +4,11 @@ import { getClientData } from '../utils/multiDbHandler.js';
 import { dbManager } from '../models/dbManager.js';
 import { requireEnrollmentKey } from '../portal/enrollmentKey.js';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+// 1. Recreate __filename and __dirname for ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const DB_FOLDER = path.resolve(__dirname, "../databases");
 
 const router = express.Router();
