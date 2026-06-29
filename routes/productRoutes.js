@@ -3,6 +3,7 @@ import { CLIENT_CONFIGS } from '../config/clients.js';
 import { getClientData } from '../utils/multiDbHandler.js';
 import { dbManager } from '../models/dbManager.js';
 import { requireEnrollmentKey } from '../portal/enrollmentKey.js';
+import path from 'path';
 const DB_FOLDER = path.resolve(__dirname, "../databases");
 
 const router = express.Router();
