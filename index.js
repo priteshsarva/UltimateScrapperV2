@@ -25,6 +25,7 @@ import { sourceCategoryRoutes, adminSourceCategoryRoutes } from "./portal/catego
 import enrollmentSourceRoutes from "./portal/enrollmentSourceRoutes.js";
 import adminEnrollmentOverview from "./portal/adminEnrollmentOverview.js";
 import statusRoute from "./portal/statusRoute.js";
+import { plansRoutes, adminPlansRoutes } from "./portal/plansRoutes.js";
 
 // const PORT = process.env.PORT || 5000;
 const PORT = 3002; // Force port 3002 for production behind Cloudflare
@@ -124,6 +125,8 @@ app.use("/portal/sources", sourceCategoryRoutes);              // GET /portal/so
 app.use("/portal/admin/sources", adminSourceCategoryRoutes);  // alongside the existing sourceRoutes
 app.use("/portal", enrollmentSourceRoutes);
 app.use("/portal/admin", adminEnrollmentOverview);
+app.use("/portal/plans", plansRoutes);              // clients: active plans for the picker
+app.use("/portal/admin/plans", adminPlansRoutes);   // admin: create/edit tiers
 
 app.options('*', cors()); // Handle preflight requests for all routes
 
