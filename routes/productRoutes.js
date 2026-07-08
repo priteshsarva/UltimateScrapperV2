@@ -5,6 +5,7 @@ import { dbManager } from '../models/dbManager.js';
 import { requireEnrollmentKey } from '../portal/enrollmentKey.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import sqlite3 from "sqlite3";
 
 // 1. Recreate __filename and __dirname for ES Modules
 const __filename = fileURLToPath(import.meta.url);
