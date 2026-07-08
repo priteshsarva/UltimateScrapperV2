@@ -1,7 +1,7 @@
 // Validates x-enrollment-key and attaches the enrollment's FULL source list.
 // One key => one site => many sources (each with its own picked categories).
 import { query } from "./db.js";
-import { mapForSources } from "./categoryMap.js";
+import { mapForEnrollment } from "./categoryMap.js";
 
 // strip protocol / www / path / port so "https://www.Stylenova.com/shop" -> "stylenova.com"
 function normDomain(d) {
@@ -87,8 +87,8 @@ export async function requireEnrollmentKey(req, res, next) {
     }
     if (!sources.length) return res.status(403).json({ error: "No sources on this enrollment" });
 
-    // canonical category mappings for these sources (raw catName -> unified name)
-    const catMaps = await mapForSources(sources.map((r) => r.source_id));
+    // this store's canonical category mappings (raw catName -> unified name)
+    const catMaps = await mapForEnrollment(enr.id);
 
     req.enrollment = {
       id: enr.id,
