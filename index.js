@@ -29,9 +29,8 @@ import { plansRoutes, adminPlansRoutes } from "./portal/plansRoutes.js";
 import shopAdminRoutes from "./portal/shopAdminRoutes.js";
 import paymentRoutes from "./portal/paymentRoutes.js";
 import { startScheduler } from "./portal/scheduler.js";
-
-                   // daily job at 08:00
-
+import { generateInvoiceForEnrollment } from "./portal/billing.js";
+import domainVerifyRoutes from "./portal/domainVerifyRoutes.js";
 
 // const PORT = process.env.PORT || 5000;
 const PORT = 3002; // Force port 3002 for production behind Cloudflare
@@ -135,8 +134,9 @@ app.use("/portal/plans", plansRoutes);              // clients: active plans for
 app.use("/portal/admin/plans", adminPlansRoutes);   // admin: create/edit tiers
 app.use("/portal/admin/shops", shopAdminRoutes);
 app.use("/portal", paymentRoutes);   // adds /portal/invoices and /portal/pay/callback
-startScheduler();  
+ app.use("/portal/admin", domainVerifyRoutes)
 
+startScheduler();  
 app.options('*', cors()); // Handle preflight requests for all routes
 
 app.get('/', async (req, res) => {
