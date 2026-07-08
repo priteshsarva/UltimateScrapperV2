@@ -32,7 +32,7 @@ import { startScheduler } from "./portal/scheduler.js";
 import { generateInvoiceForEnrollment } from "./portal/billing.js";
 import domainVerifyRoutes from "./portal/domainVerifyRoutes.js";
 import clientShopRoutes from "./portal/clientShopRoutes.js";
-import {categoryMapRoutes} from "./portal/categoryMapRoutes.js";
+import categoryMapRoutes from "./portal/categoryMapRoutes.js";
 // const PORT = process.env.PORT || 5000;
 const PORT = 3002; // Force port 3002 for production behind Cloudflare
 
