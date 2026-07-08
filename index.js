@@ -137,7 +137,7 @@ app.use("/portal/admin/shops", shopAdminRoutes);
 app.use("/portal", paymentRoutes);   // adds /portal/invoices and /portal/pay/callback
 app.use("/portal/admin", domainVerifyRoutes)
 app.use("/portal", clientShopRoutes);
-app.use("/portal/admin", categoryMapRoutes)
+app.use("/portal", categoryMapRoutes)
 
 startScheduler();
 app.options('*', cors()); // Handle preflight requests for all routes
