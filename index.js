@@ -33,6 +33,11 @@ import { generateInvoiceForEnrollment } from "./portal/billing.js";
 import domainVerifyRoutes from "./portal/domainVerifyRoutes.js";
 import clientShopRoutes from "./portal/clientShopRoutes.js";
 import categoryMapRoutes from "./portal/categoryMapRoutes.js";
+
+import productRefreshRoute from "./portal/productRefreshRoute.js";
+
+
+
 // const PORT = process.env.PORT || 5000;
 const PORT = 3002; // Force port 3002 for production behind Cloudflare
 
@@ -153,6 +158,8 @@ app.get('/', async (req, res) => {
 app.use("/product", statusRoute);
 app.use('/product', tenantIdentify, productRoutes);
 
+app.use("/product", productRefreshRoute);            // new, keyed
+app.use("/product", tenantIdentify, productRoutes);  // old system + /dev, unchanged
 
 app.get('/updateserver', async (req, res) => {
     try {
