@@ -3,6 +3,9 @@ import { CLIENT_CONFIGS } from '../config/clients.js';
 
 export const tenantIdentify = (req, res, next) => {
     // 1. Check Origin or Referer (Frontend Domain), fallback to Host or Custom Header
+
+    if (req.headers['x-enrollment-key']) return next();
+    
     const clientOrigin =
         req.headers['x-enrollment-key'] ||
         req.headers['x-client-id'] ||      

@@ -1,51 +1,62 @@
-// New, KEYED live single-product refresh — for the new plugin only.
-// The old /dev/update-single-product route stays exactly as-is for the old system.
+// New, KEYED live single-product refresh — NON-BLOCKING.
+// Returns instantly: 'fresh' (product current) or 'refreshing' (scrape kicked off
+// in the background). The plugin polls until it goes fresh. This means no request
+// hangs for the 5–15s scrape, and no WordPress PHP worker is held that whole time.
 //
-// Mount it BEFORE the tenant line so it bypasses the old tenantIdentify layer
-// (it authenticates via the enrollment key instead):
+// Mount BEFORE the tenant line:
 //   import productRefreshRoute from "./portal/productRefreshRoute.js";
-//   app.use("/product", productRefreshRoute);              // <-- keyed, no tenantIdentify
-//   app.use("/product", tenantIdentify, productRoutes);    // old system, unchanged
-//
-// It reuses your EXISTING re-scrape logic. Extract the core of your current
-// /dev/update-single-product handler into a shared function:
-//   export async function refreshSingleProduct(productId, dbName) { ...lookup + stale check + live scrape + write back...; return productRow | null }
-// ...and both the old /dev route and this one call it (no duplicated scraper code).
+//   app.use("/product", productRefreshRoute);
+//   app.use("/product", tenantIdentify, productRoutes);
 import { Router } from "express";
 import { requireEnrollmentKey } from "./enrollmentKey.js";
-import { refreshSingleProduct } from "../core/refreshProduct.js"; // <-- adjust path to where you extract it
+import { findProduct, isStale, rescrape } from "../core/refreshProduct.js"; // adjust path if needed
 
 const router = Router();
+
+// in-memory: products currently being scraped, and when each was last attempted
+const refreshing = new Set();
+const lastAttempt = new Map();
+const RETRY_COOLDOWN_MS = 60 * 1000; // don't re-fire a scrape for the same product within 60s
 
 // GET /product/refresh-one?productId=70850&category=watches
 router.get("/refresh-one", requireEnrollmentKey, async (req, res) => {
   try {
     const productId = req.query.productId;
-    const category = req.query.category || req.query.productDb; // accept either name
-    if (!productId || !category) {
-      return res.status(400).json({ error: "productId and category required" });
-    }
+    const category = req.query.category || req.query.productDb;
+    if (!productId || !category) return res.status(400).json({ error: "productId and category required" });
 
-    // only sources this store is enrolled in, for this category
     const catSources = (req.enrollment.sources || []).filter((s) => s.sourceCategory === category);
     if (!catSources.length) return res.status(403).json({ error: "Not enrolled in this category" });
 
-    // your existing logic (now shared): re-scrape if stale, return the fresh row
-    const result = await refreshSingleProduct(productId, category);
-    if (!result || !result.product) return res.status(404).json({ error: "Product not found" });
-    const product = result.product;
+    const product = await findProduct(productId, category);
+    if (!product) return res.status(404).json({ error: "Product not found" });
 
-    // security: the product must belong to one of THIS store's sources
+    // the product must belong to one of THIS store's sources
     const src = catSources.find(
       (s) => s.searchKey && product.productFetchedFrom && product.productFetchedFrom.includes(s.searchKey)
     );
     if (!src) return res.status(403).json({ error: "Product not in your catalogue" });
 
-    // apply this store's category grouping, same as sync-feed
-    if (src.catMap && src.catMap[product.catName]) product.catName = src.catMap[product.catName];
-    product.dbName = category;
+    const apply = (p) => {
+      if (src.catMap && src.catMap[p.catName]) p.catName = src.catMap[p.catName];
+      p.dbName = category;
+      return p;
+    };
 
-    res.json({ status: result.status, product });
+    // fresh enough — return immediately
+    if (!isStale(product)) return res.json({ status: "fresh", product: apply(product) });
+
+    // stale — start ONE background scrape (rate-limited), return without waiting
+    const key = category + ":" + productId;
+    const recentlyTried = lastAttempt.has(key) && Date.now() - lastAttempt.get(key) < RETRY_COOLDOWN_MS;
+    if (!refreshing.has(key) && !recentlyTried) {
+      refreshing.add(key);
+      lastAttempt.set(key, Date.now());
+      rescrape(product, category)
+        .catch(() => {})
+        .finally(() => refreshing.delete(key));
+    }
+    return res.json({ status: "refreshing", product: apply(product) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
