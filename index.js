@@ -154,11 +154,11 @@ app.get('/', async (req, res) => {
     res.status(200).json({ status: 200, server: "Runnnig" });
 
 });
+app.use("/product", productRefreshRoute);            // new, keyed
 
 app.use("/product", statusRoute);
 app.use('/product', tenantIdentify, productRoutes);
 
-app.use("/product", productRefreshRoute);            // new, keyed
 app.use("/product", tenantIdentify, productRoutes);  // old system + /dev, unchanged
 
 app.get('/updateserver', async (req, res) => {
