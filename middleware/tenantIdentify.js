@@ -5,6 +5,7 @@ export const tenantIdentify = (req, res, next) => {
     // 1. Check Origin or Referer (Frontend Domain), fallback to Host or Custom Header
     const clientOrigin =
         req.headers['x-enrollment-key'] ||
+        req.headers['x-client-id'] ||      
         req.headers.origin ||
         req.headers.referer ||
         req.headers.host ||

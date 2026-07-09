@@ -153,6 +153,7 @@ app.get('/', async (req, res) => {
 app.use("/product", statusRoute);
 app.use('/product', tenantIdentify, productRoutes);
 
+
 app.get('/updateserver', async (req, res) => {
     try {
         console.log("working");
