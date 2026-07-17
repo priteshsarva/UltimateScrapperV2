@@ -409,7 +409,7 @@ async function scrapeProducts(page, categories, baseUrl, DB) {
                     console.log(`⏭️ [${i + 1}/${catProductss.length}] Skipped WP sync (no changes). ProductID = ${productId}`);
                 } else {
                     console.log(`🔄 [${i + 1}/${catProductss.length}] Syncing to WordPress... ProductID = ${productId}`);
-                    await syncProductToAllSites(eachproduct, productId);
+                    // await syncProductToAllSites(eachproduct, productId);
 
                     // 🔧 FIX: Wait between API calls to prevent MySQL connection flooding
                     if (i < catProductss.length - 1) {
