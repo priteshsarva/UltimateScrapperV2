@@ -396,10 +396,10 @@ async function scrapeProducts(page, categories, baseUrl, DB) {
                     // await syncProductToAllSites(eachproduct, productId);
 
                     // 🔧 FIX: Wait between API calls to prevent MySQL connection flooding
-                    if (i < catProductss.length - 1) {
-                        console.log(`⏳ Waiting ${API_DELAY_MS}ms before next API call...`);
-                        await new Promise(resolve => setTimeout(resolve, API_DELAY_MS));
-                    }
+                    // if (i < catProductss.length - 1) {
+                    //     console.log(`⏳ Waiting ${API_DELAY_MS}ms before next API call...`);
+                    //     await new Promise(resolve => setTimeout(resolve, API_DELAY_MS));
+                    // }
                 }
             }
 

@@ -377,8 +377,8 @@ router.get('/update-single-product', async (req, res) => {
         });
 
         // Sync to WooCommerce quietly in the background AFTER sending the response
-        console.log(`🌐 Syncing fresh data to WooCommerce sites in the background...`);
-        await syncProductToAllSites(freshProductData, freshProductData.productId);
+        // console.log(`🌐 Syncing fresh data to WooCommerce sites in the background...`);
+        // await syncProductToAllSites(freshProductData, freshProductData.productId);
 
     } catch (error) {
         console.error("❌ Error in single product update route:", error);
