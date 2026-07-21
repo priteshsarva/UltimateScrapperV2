@@ -35,7 +35,7 @@ import clientShopRoutes from "./portal/clientShopRoutes.js";
 import categoryMapRoutes from "./portal/categoryMapRoutes.js";
 
 import productRefreshRoute from "./portal/productRefreshRoute.js";
-
+import { sppSyncLogger } from './spp-sync-logger.js';
 
 
 // const PORT = process.env.PORT || 5000;
@@ -116,6 +116,8 @@ async function runRotator() {
 
 const app = express()
 app.use(express.json());// for parsing application/json
+app.use(sppSyncLogger());
+
 // Enable CORS for all routes
 app.use(cors({
     // origin: 'http://localhost:5173', // Allow requests from this origin
