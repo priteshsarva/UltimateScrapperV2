@@ -7,14 +7,28 @@ import "dotenv/config";
 puppeteer.use(StealthPlugin());
 
 /**
- * Scrapes a single product using Method A structure, updates the local DB, 
+ * Scrapes a single product using Method A structure, updates the local DB,
  * and returns the fresh data object.
+ *
+ * DEAD-PAGE HANDLING
+ * A product is forced to availability = 0 when ANY of these is true:
+ *   - navigation failed (timeout, DNS, connection reset)
+ *   - HTTP status >= 400
+ *   - the page renders cartpe's 404 body (.error_box_404 / .img_404 /
+ *     "Page Not Found") even though it returns HTTP 200 — a SOFT 404
+ *   - the product title element is missing (not a product page)
+ *
+ * The DB row is still UPDATED in that case rather than skipped: the smart merge
+ * keeps the old name/price/images and only flips stock to 0. productLastUpdated
+ * is bumped, so the WordPress plugin's ts-sweep picks the change up next pass.
  */
 export async function scrapeSingleProductMethodA(productUrl, dbName) {
     console.log(`\n🚀 [LiveMethodA] Starting single scrape for: ${productUrl}`);
 
     let browser = null;
     let freshData = null;
+    let dead = false;
+    let deadReason = '';
 
     try {
         // 👇 FIXED MEMORY LEAK: Removed 'const' so the outer 'browser' variable gets assigned and properly closed in 'finally'
@@ -65,16 +79,129 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
 
         console.log(`⏳ Navigating to product page...`);
 
-        // 👇 Grab the HTTP response to check the status code
-        const response = await page.goto(productUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        // ==========================================
+        // 🚨 NAVIGATION FAILURE (timeout / DNS / reset)
+        // Treated as "product unavailable", NOT as a crash — we still want to
+        // write availability = 0 rather than leave a dead product in stock.
+        // ==========================================
+        let httpStatus = 0;
+        try {
+            const response = await page.goto(productUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            httpStatus = response ? response.status() : 0;
+        } catch (navErr) {
+            dead = true;
+            deadReason = `navigation failed: ${navErr.message}`;
+        }
 
         // ==========================================
-        // 🚨 404 ERROR HANDLING (PAGE DELETED)
+        // 🚨 HTTP ERROR STATUS (hard 404 / 410 / 5xx)
         // ==========================================
-        if (response && response.status() === 404) {
-            console.log(`⚠️ [LiveMethodA] Product page returned 404 Not Found! Forcing availability to 0.`);
+        if (!dead && httpStatus >= 400) {
+            dead = true;
+            deadReason = `HTTP ${httpStatus}`;
+        }
 
-            // Set dummy data for 404. Smart Merge will keep the old Name/Price/Images but force stock to 0.
+        if (!dead) {
+            console.log(`🕵️‍♂️ Extracting product details...`);
+            try {
+                freshData = await page.evaluate(() => {
+
+                    // Initialize default values to prevent ReferenceErrors
+                    let productName = null;
+                    let productOriginalPrice = null;
+                    let availability = 0;
+                    let imageUrls = [];
+                    let featuredimg = null;
+                    let videoUrl = null;
+                    let sizeName = [];
+
+                    // --- TITLE ---
+                    const titleEl = document.querySelector(".s_product_text > h1");
+                    productName = titleEl ? titleEl.textContent.trim() : null;
+
+                    // --- SOFT 404 DETECTION ---
+                    // cartpe serves its 404 body with a 200 status. Markers taken
+                    // from the real 404 markup: hidden #container h1, .error_box_404,
+                    // .img_404.
+                    const errBox   = document.querySelector('.error_box_404, .img_404');
+                    const hiddenH1 = document.querySelector('#container h1');
+                    const docTitle = (document.title || '').toLowerCase();
+                    const bodyTxt  = (document.body ? (document.body.innerText || '') : '')
+                                        .slice(0, 2000).toLowerCase();
+
+                    const pageIsError =
+                        !!errBox ||
+                        (hiddenH1 && /404|not\s*found/i.test(hiddenH1.textContent || '')) ||
+                        /404|page not found/.test(docTitle) ||
+                        // body text is only trusted when there is no product title
+                        // anyway, so a product legitimately named "404" can't
+                        // false-positive
+                        (!titleEl && /page not found|404/.test(bodyTxt));
+
+                    if (titleEl) {
+                        // --- PRICE ---
+                        const priceEl = document.querySelector(".s_product_text #price_div h1");
+                        if (priceEl && priceEl.textContent) {
+                            const match = priceEl.textContent.match(/\d+/);
+                            if (match) productOriginalPrice = parseInt(match[0], 10);
+                        }
+
+                        // --- AVAILABILITY (STOCK) ---
+                        const outOfStockBadge = document.querySelector('.badge-danger');
+                        if (outOfStockBadge && outOfStockBadge.textContent.toLowerCase().includes('out of stock')) {
+                            availability = 0;
+                        } else {
+                            availability = 1;
+                        }
+
+                        // --- IMAGES ---
+                        const imgElements = document.querySelectorAll('#slider .slides .main-image img');
+                        imageUrls = Array.from(imgElements).map(img => img.src).filter(src => src);
+                        featuredimg = imageUrls.length > 0 ? imageUrls[0] : null;
+
+                        // --- VIDEO ---
+                        const videoEl = document.querySelector('video#myVideo source');
+                        videoUrl = videoEl ? videoEl.src : null;
+
+                        // --- SIZES ---
+                        const sizeElements = document.querySelectorAll('.size-setup ul li a.size_click');
+                        sizeName = Array.from(sizeElements).map(el => el.textContent.trim());
+                    }
+
+                    return {
+                        productName,
+                        productOriginalPrice,
+                        availability,
+                        imageUrl: imageUrls,
+                        featuredimg,
+                        videoUrl,
+                        sizeName,
+                        pageIsError,
+                        hasTitle: !!titleEl
+                    };
+                });
+            } catch (evalErr) {
+                dead = true;
+                deadReason = `extraction failed: ${evalErr.message}`;
+            }
+        }
+
+        // ==========================================
+        // 🚨 SOFT 404 / NOT A PRODUCT PAGE
+        // ==========================================
+        if (!dead && freshData) {
+            if (freshData.pageIsError) {
+                dead = true;
+                deadReason = 'soft 404 (error page markup)';
+            } else if (!freshData.hasTitle) {
+                dead = true;
+                deadReason = 'no product title on page';
+            }
+        }
+
+        if (dead) {
+            console.log(`⚠️ [LiveMethodA] Product unavailable — ${deadReason}. Forcing availability to 0.`);
+            // Smart Merge keeps the old Name/Price/Images but forces stock to 0.
             freshData = {
                 productName: null,
                 productOriginalPrice: null,
@@ -85,68 +212,12 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                 sizeName: []
             };
         } else {
-            // Page loaded normally, let's extract the data!
-            console.log(`🕵️‍♂️ Extracting product details...`);
-            freshData = await page.evaluate(() => {
-
-                // Initialize default values to prevent ReferenceErrors
-                let productName = null;
-                let productOriginalPrice = null;
-                let availability = 0;
-                let imageUrls = [];
-                let featuredimg = null;
-                let videoUrl = null;
-                let sizeName = [];
-
-                // --- TITLE ---
-                const titleEl = document.querySelector(".s_product_text > h1");
-                productName = titleEl ? titleEl.textContent.trim() : null;
-
-                if (titleEl) {
-                    // --- PRICE ---
-                    const priceEl = document.querySelector(".s_product_text #price_div h1");
-                    if (priceEl && priceEl.textContent) {
-                        const match = priceEl.textContent.match(/\d+/);
-                        if (match) productOriginalPrice = parseInt(match[0], 10);
-                    }
-
-                    // --- AVAILABILITY (STOCK) ---
-                    const outOfStockBadge = document.querySelector('.badge-danger');
-                    if (outOfStockBadge && outOfStockBadge.textContent.toLowerCase().includes('out of stock')) {
-                        availability = 0;
-                    } else {
-                        availability = 1;
-                    }
-
-                    // --- IMAGES ---
-                    const imgElements = document.querySelectorAll('#slider .slides .main-image img');
-                    imageUrls = Array.from(imgElements).map(img => img.src).filter(src => src);
-                    featuredimg = imageUrls.length > 0 ? imageUrls[0] : null;
-
-                    // --- VIDEO ---
-                    const videoEl = document.querySelector('video#myVideo source');
-                    videoUrl = videoEl ? videoEl.src : null;
-
-                    // --- SIZES ---
-                    const sizeElements = document.querySelectorAll('.size-setup ul li a.size_click');
-                    sizeName = Array.from(sizeElements).map(el => el.textContent.trim());
-                }
-
-                return {
-                    productName,
-                    productOriginalPrice,
-                    availability,
-                    imageUrl: imageUrls,
-                    featuredimg,
-                    videoUrl,
-                    sizeName
-                };
-            });
+            console.log('✅ Raw Extracted Data:', freshData);
         }
 
-        console.log('✅ Raw Extracted Data:', freshData);
-
     } catch (error) {
+        // Only infrastructure failures reach here (browser launch, page creation).
+        // Those are our problem, not the product's — surface them.
         console.error('❌ [LiveMethodA] Scraping failed:', error.message);
         throw error;
     } finally {
@@ -216,7 +287,8 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
         db.run(sql, params, function (err) {
             if (err) reject(err);
             else {
-                console.log(`✅ DB Update successful. Rows changed: ${this.changes}`);
+                console.log(`✅ DB Update successful. Rows changed: ${this.changes}`
+                    + (dead ? ` (marked OUT OF STOCK — ${deadReason})` : ''));
                 resolve(this.changes);
             }
         });
