@@ -9,7 +9,7 @@ import "dotenv/config";
 puppeteer.use(StealthPlugin());
 
 const LAUNCH = {
-  headless: false,
+  headless: 'new',
   executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
   args: [
     "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",

@@ -1,28 +1,46 @@
 // ============================================================================
-// UPDATED /product/sync-feed  — cross-category aware.
-// Replace your existing sync-feed route with this. The ONLY new behaviour is the
-// `category` query param (so the plugin can pull each database separately);
-// everything else — keyset pagination, per-source WHERE, dbName tagging — is
-// unchanged and backward compatible (no `category` => first source's category).
+// UPDATED /product/sync-feed  — cross-category aware + STOCK-ORDERED BACKFILL.
 //
-// Requires these imports at the top of productRoutes.js (you almost certainly
-// already have them, since your current sync-feed opens these DBs):
+// NEW in this version: the `stock` query param.
+//   ?stock=in   -> only in-stock products
+//   ?stock=out  -> only out-of-stock products
+//   (omitted)   -> everything, exactly as before
 //
+// Plugin v3.7.0 uses this to run the backfill in two passes (in-stock first,
+// then out-of-stock) so a new store fills with sellable products immediately.
+// Omitting the param keeps older plugins working unchanged.
+//
+// DEPLOY THIS BEFORE UPDATING THE PLUGIN. If the plugin ships first, the server
+// ignores `stock`, backfill_in pulls everything and backfill_out pulls it all
+// again — harmless (the plugin's ts-skip makes the second pass cheap) but wasteful.
+//
+// Requires these imports at the top of productRoutes.js:
 //   import sqlite3 from "sqlite3";
 //   import path from "path";
 //   import { fileURLToPath } from "url";
 //   const __dirname = path.dirname(fileURLToPath(import.meta.url));
 //
 // IMPORTANT: keep whatever DB_FOLDER value your current file already uses.
-// In portal/ files it's "../databases"; if productRoutes.js sits elsewhere,
-// use the same relative path your working sync-feed already uses.
 const DB_FOLDER = path.resolve(__dirname, "../databases");
 // ============================================================================
+
+// availability arrives from the scrapers as 0/1, and historically as
+// 'true'/'false' strings on some rows. COALESCE matters: without it a NULL
+// availability makes both `= 1` and `NOT (= 1)` evaluate to NULL, and the row
+// would be invisible to BOTH backfill passes — silently never imported.
+// NULL is treated as out-of-stock, matching the plugin's normalize_availability().
+const IS_IN_STOCK =
+  "(COALESCE(LOWER(CAST(availability AS TEXT)), '0') IN ('1','true','yes'))";
 
 router.get("/sync-feed", requireEnrollmentKey, async (req, res) => {
   const by    = req.query.by === "ts" ? "ts" : "id";
   const after = parseInt(req.query.after, 10) || 0;
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 200);
+
+  // (0) optional stock filter — anything other than 'in'/'out' means unfiltered
+  const stock = req.query.stock === "in" ? "in"
+              : req.query.stock === "out" ? "out"
+              : "";
 
   const sources = req.enrollment.sources || [];
 
@@ -61,11 +79,19 @@ router.get("/sync-feed", requireEnrollmentKey, async (req, res) => {
   });
   params.push(limit);
 
+  // (4) stock clause — no bound params, so it can sit anywhere in the WHERE
+  //     without disturbing the existing parameter order.
+  const stockClause =
+      stock === "in"  ? ` AND ${IS_IN_STOCK}`
+    : stock === "out" ? ` AND NOT ${IS_IN_STOCK}`
+    : "";
+
   const sql = `
     SELECT *
       FROM PRODUCTS
      WHERE ${cursorCol} > ?
        AND (${sourceClauses.join(" OR ")})
+       ${stockClause}
      ORDER BY ${cursorCol} ASC
      LIMIT ?`;
 
@@ -89,7 +115,7 @@ router.get("/sync-feed", requireEnrollmentKey, async (req, res) => {
       }
     }
 
-    res.json({ by, after, count: rows.length, results: rows });
+    res.json({ by, after, count: rows.length, results: rows, stock: stock || undefined });
   } catch (e) {
     res.status(500).json({ error: e.message });
   } finally {

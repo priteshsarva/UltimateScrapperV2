@@ -6,11 +6,28 @@ import "dotenv/config";
 // Use the stealth plugin to avoid detection
 puppeteer.use(StealthPlugin());
 
+/**
+ * Scrapes a single product using Method B structure, updates the local DB,
+ * and returns the fresh data object.
+ *
+ * DEAD-PAGE HANDLING (same contract as Method A)
+ * availability is forced to 0 when ANY of these is true:
+ *   - navigation failed (timeout, DNS, connection reset)
+ *   - HTTP status >= 400
+ *   - the page renders an error/404 body despite a 200 status (SOFT 404)
+ *   - the product title element is missing (not a product page)
+ *
+ * FIXED: the previous version defaulted to availability = 1 whenever the
+ * `.item-stock-status p` element was absent. On a 404 page that element is
+ * always absent, so dead products were being marked IN STOCK.
+ */
 export async function scrapeSingleProductMethodB(productUrl, dbName) {
     console.log(`\n🚀 [LiveMethodB] Starting single scrape for: ${productUrl}`);
-    
+
     let browser = null;
     let freshData = null;
+    let dead = false;
+    let deadReason = '';
 
     try {
         browser = await puppeteer.launch({
@@ -59,75 +76,151 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
         );
         
         console.log(`⏳ Navigating to product page...`);
-        await page.goto(productUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-        console.log(`🕵️‍♂️ Extracting product details (Method B)...`);
-        freshData = await page.evaluate(() => {
+        // ==========================================
+        // 🚨 NAVIGATION FAILURE (timeout / DNS / reset)
+        // Treated as "product unavailable", NOT as a crash.
+        // ==========================================
+        let httpStatus = 0;
+        try {
+            const response = await page.goto(productUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+            httpStatus = response ? response.status() : 0;
+        } catch (navErr) {
+            dead = true;
+            deadReason = `navigation failed: ${navErr.message}`;
+        }
 
-             let availability = 0; 
-            
-            // --- TITLE ---
-            // In Method B, the title is inside .product-right h3
-            const titleEl = document.querySelector(".product-right h3");
-            const productName = titleEl ? titleEl.textContent.trim() : null;
+        // ==========================================
+        // 🚨 HTTP ERROR STATUS (hard 404 / 410 / 5xx)
+        // ==========================================
+        if (!dead && httpStatus >= 400) {
+            dead = true;
+            deadReason = `HTTP ${httpStatus}`;
+        }
 
-            // --- PRICE ---
-            // In Method B, the price is inside .price-wrapper span.font-bold
-            const priceEl = document.querySelector(".product-right .price-wrapper span.font-bold");
-            let productOriginalPrice = null;
-            if (priceEl && priceEl.textContent) {
-                // Extracts digits, e.g., "₹350.00" -> 350
-                const match = priceEl.textContent.match(/\d+/);
-                if (match) productOriginalPrice = parseInt(match[0], 10);
+        if (!dead) {
+            console.log(`🕵️‍♂️ Extracting product details (Method B)...`);
+            try {
+                freshData = await page.evaluate(() => {
+
+                    let availability = 0;
+
+                    // --- TITLE ---
+                    // In Method B, the title is inside .product-right h3
+                    const titleEl = document.querySelector(".product-right h3");
+                    const productName = titleEl ? titleEl.textContent.trim() : null;
+
+                    // --- SOFT 404 DETECTION ---
+                    const errBox   = document.querySelector('.error_box_404, .img_404, .error-404, .page-404');
+                    const hiddenH1 = document.querySelector('#container h1');
+                    const docTitle = (document.title || '').toLowerCase();
+                    const bodyTxt  = (document.body ? (document.body.innerText || '') : '')
+                                        .slice(0, 2000).toLowerCase();
+
+                    const pageIsError =
+                        !!errBox ||
+                        (hiddenH1 && /404|not\s*found/i.test(hiddenH1.textContent || '')) ||
+                        /404|page not found/.test(docTitle) ||
+                        // body text is only trusted when there is no product title
+                        // anyway, so a product legitimately named "404" can't
+                        // false-positive
+                        (!titleEl && /page not found|404/.test(bodyTxt));
+
+                    // --- PRICE ---
+                    // In Method B, the price is inside .price-wrapper span.font-bold
+                    const priceEl = document.querySelector(".product-right .price-wrapper span.font-bold");
+                    let productOriginalPrice = null;
+                    if (priceEl && priceEl.textContent) {
+                        // Extracts digits, e.g., "₹350.00" -> 350
+                        const match = priceEl.textContent.match(/\d+/);
+                        if (match) productOriginalPrice = parseInt(match[0], 10);
+                    }
+
+                    // --- AVAILABILITY (STOCK) ---
+                    // Method B says "Out of stock" (or "In stock") inside .item-stock-status p
+                    //
+                    // FIXED: previously a MISSING stock element fell into `else` and set
+                    // availability = 1. On a 404 page the element is always missing, so
+                    // deleted products were marked in stock. Now a missing element only
+                    // means "in stock" when there is a real product title on the page.
+                    const stockStatus = document.querySelector('.item-stock-status p');
+                    if (stockStatus) {
+                        availability = stockStatus.textContent.toLowerCase().includes('out of stock') ? 0 : 1;
+                    } else {
+                        availability = titleEl ? 1 : 0;
+                    }
+
+                    // --- IMAGES ---
+                    // Method B hides high-res images in the thumbnail buttons: .thumbs-sub-slider button img
+                    const imgElements = document.querySelectorAll('.thumbs-sub-slider button img');
+                    let imageUrls = Array.from(imgElements).map(img => img.src).filter(src => src && !src.includes('placeholder'));
+
+                    // Fallback: Check the main slider if thumbs aren't loaded yet
+                    if (imageUrls.length === 0) {
+                        const mainImgs = document.querySelectorAll('.product-slide .relative.w-full img');
+                        imageUrls = Array.from(mainImgs).map(img => img.src).filter(src => src && !src.includes('placeholder'));
+                    }
+
+                    const featuredimg = imageUrls.length > 0 ? imageUrls[0] : null;
+
+                    // --- VIDEO ---
+                    // Method B has the video hidden inside the thumbnail slider or main slider: video source
+                    const videoEl = document.querySelector('.product-slide video source');
+                    const videoUrl = videoEl ? videoEl.src : null;
+
+                    // --- SIZES ---
+                    const sizeElements = document.querySelectorAll('.size-badge, .size-setup ul li a');
+                    const sizeName = Array.from(sizeElements).map(el => el.textContent.trim());
+
+                    return {
+                        productName,
+                        productOriginalPrice,
+                        availability,
+                        imageUrl: imageUrls,
+                        featuredimg,
+                        videoUrl,
+                        sizeName,
+                        pageIsError,
+                        hasTitle: !!titleEl
+                    };
+                });
+            } catch (evalErr) {
+                dead = true;
+                deadReason = `extraction failed: ${evalErr.message}`;
             }
+        }
 
-            // --- AVAILABILITY (STOCK) ---
-            // Method B says "Out of stock" (or "In stock") inside .item-stock-status p
-           
-            const stockStatus = document.querySelector('.item-stock-status p');
-            if (stockStatus && stockStatus.textContent.toLowerCase().includes('out of stock')) {
-                availability = 0;
-            }else{
-                availability = 1;
+        // ==========================================
+        // 🚨 SOFT 404 / NOT A PRODUCT PAGE
+        // ==========================================
+        if (!dead && freshData) {
+            if (freshData.pageIsError) {
+                dead = true;
+                deadReason = 'soft 404 (error page markup)';
+            } else if (!freshData.hasTitle) {
+                dead = true;
+                deadReason = 'no product title on page';
             }
+        }
 
-            // --- IMAGES ---
-            // Method B hides high-res images in the thumbnail buttons: .thumbs-sub-slider button img
-            const imgElements = document.querySelectorAll('.thumbs-sub-slider button img');
-            let imageUrls = Array.from(imgElements).map(img => img.src).filter(src => src && !src.includes('placeholder'));
-            
-            // Fallback: Check the main slider if thumbs aren't loaded yet
-            if (imageUrls.length === 0) {
-                const mainImgs = document.querySelectorAll('.product-slide .relative.w-full img');
-                imageUrls = Array.from(mainImgs).map(img => img.src).filter(src => src && !src.includes('placeholder'));
-            }
-            
-            const featuredimg = imageUrls.length > 0 ? imageUrls[0] : null;
-
-            // --- VIDEO ---
-            // Method B has the video hidden inside the thumbnail slider or main slider: video source
-            const videoEl = document.querySelector('.product-slide video source');
-            const videoUrl = videoEl ? videoEl.src : null;
-
-            // --- SIZES ---
-            // Method B size extraction (You didn't provide HTML for sizes, but this is a standard fallback)
-            const sizeElements = document.querySelectorAll('.size-badge, .size-setup ul li a');
-            const sizeName = Array.from(sizeElements).map(el => el.textContent.trim());
-
-            return {
-                productName,
-                productOriginalPrice,
-                availability,
-                imageUrl: imageUrls,
-                featuredimg,
-                videoUrl,
-                sizeName
+        if (dead) {
+            console.log(`⚠️ [LiveMethodB] Product unavailable — ${deadReason}. Forcing availability to 0.`);
+            // Smart Merge keeps the old Name/Price/Images but forces stock to 0.
+            freshData = {
+                productName: null,
+                productOriginalPrice: null,
+                availability: 0,
+                imageUrl: [],
+                featuredimg: null,
+                videoUrl: null,
+                sizeName: []
             };
-        });
-
-        console.log('✅ Raw Extracted Data:', freshData);
+        } else {
+            console.log('✅ Raw Extracted Data:', freshData);
+        }
 
     } catch (error) {
+        // Only infrastructure failures reach here (browser launch, page creation).
         console.error('❌[LiveMethodB] Scraping failed:', error.message);
         throw error;
     } finally {
@@ -195,7 +288,8 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
         db.run(sql, params, function(err) {
             if (err) reject(err);
             else {
-                console.log(`✅ DB Update successful. Rows changed: ${this.changes}`);
+                console.log(`✅ DB Update successful. Rows changed: ${this.changes}`
+                    + (dead ? ` (marked OUT OF STOCK — ${deadReason})` : ''));
                 resolve(this.changes);
             }
         });

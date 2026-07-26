@@ -2,12 +2,21 @@
 //  - Existing sources: read clean per-source categories from SQLite PRODUCTS (instant).
 //  - New sources (approval): live-scrape the category page first.
 //  - Stored in Supabase source_categories; admin enable/disable is preserved on refresh.
+//
+// TWO PATHS, DELIBERATELY DIFFERENT:
+//   refreshSourceCategoriesFromDB  -> counts only. NEVER deprecates, because it
+//                                     reads categories that have products; a real
+//                                     category with no products yet is simply absent.
+//   scrapeSourceCategories         -> full reconcile against the live category page,
+//                                     which IS the authoritative list, so it may
+//                                     deprecate categories that have disappeared.
 import sqlite3 from "sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
-import { query } from "./db.js";
+import { query, pool } from "./db.js";
 import { getSource, listSources } from "./sources.js";
 import { scrapeCategoriesA, scrapeCategoriesB } from "./scrapeCategories.js";
+import { reconcileCategories } from "./reconcileCategories.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // databases/ sits at the server root (sibling of portal/). Adjust if yours differs.
@@ -71,6 +80,8 @@ async function readCategoryCounts(source) {
   }
 }
 
+// Count-only upsert. Used ONLY by the DB path — it never deprecates and never
+// touches `enabled` on an existing row.
 async function upsertCategories(sourceId, cats, { withCount = true } = {}) {
   for (const c of cats) {
     await query(
@@ -87,6 +98,7 @@ async function upsertCategories(sourceId, cats, { withCount = true } = {}) {
 }
 
 // Existing source: instant, from products already in SQLite.
+// Refreshes counts. Does NOT deprecate — see the note at the top of this file.
 export async function refreshSourceCategoriesFromDB(sourceId) {
   const source = await getSource(sourceId);
   if (!source) throw new Error("Source not found");
@@ -108,34 +120,65 @@ export async function refreshAllSourceCategoriesFromDB() {
   return total;
 }
 
-// New source (categories-first on approval) and the accurate fix for existing
+// New source (categories-first on approval) and the accurate refresh for existing
 // sources: live-scrape the category page (headless Chrome) for exact per-source
-// name + slug + img, then merge in product counts from the DB.
-export async function scrapeSourceCategories(source) {
+// name + url + img, merge in product counts from SQLite, then RECONCILE.
+//
+// Returns the reconcile result object, not a bare count. Callers that want the
+// old number should read `.scrapedCount`.
+export async function scrapeSourceCategories(source, opts = {}) {
   let cats = [];
   if (source.method === "METHOD_A") cats = await scrapeCategoriesA(source.base_url);
   else if (source.method === "METHOD_B") cats = await scrapeCategoriesB(source.base_url);
+  else throw new Error(`Unknown scrape method "${source.method}" for source ${source.id}`);
 
-  const seen = new Set();
-  cats = cats.filter((c) => c.name && !seen.has(c.name) && seen.add(c.name));
+  // No de-dupe here any more: reconcileCategories de-dupes by handle, which is
+  // more accurate than by name (two nav entries can share a label).
 
-  // accurate per-source counts from the DB, matched by catName
+  // accurate per-source counts from SQLite, keyed by the catName on products
   let counts = new Map();
-  try { counts = await readCategoryCounts(source); } catch (_) { /* no products yet */ }
-  cats = cats.map((c) => ({ ...c, count: counts.get(c.name) || 0 }));
+  try {
+    counts = await readCategoryCounts(source);
+  } catch (_) {
+    /* no products yet — fine, counts stay 0 */
+  }
 
-  // withCount:true so counts are written and the scraped slug/img overwrite
-  // any stale/contaminated values from an earlier DB-read populate.
-  await upsertCategories(source.id, cats, { withCount: true });
-  return cats.length;
+  const scraped = cats.map((c) => ({
+    name: c.name,
+    url: c.slug,                       // scrapers return the absolute URL as `slug`
+    img: c.img,
+    productCount: counts.get(c.name) ?? 0,
+  }));
+
+  const result = await reconcileCategories(pool, source.id, scraped, {
+    countsByName: counts,              // lets reconcile recover counts after a rename
+    dryRun: opts.dryRun === true,
+    minRatio: opts.minRatio,
+  });
+
+  const bits = [`${result.scrapedCount} scraped`, `${result.updated} updated`];
+  if (result.added.length)      bits.push(`${result.added.length} added`);
+  if (result.renamed.length)    bits.push(`${result.renamed.length} renamed`);
+  if (result.revived.length)    bits.push(`${result.revived.length} revived`);
+  if (result.adopted.length)    bits.push(`${result.adopted.length} adopted`);
+  if (result.deprecated.length) bits.push(`${result.deprecated.length} DEPRECATED`);
+  console.log(`[categories] ${source.id}${result.dryRun ? " (dry run)" : ""}: ${bits.join(", ")}`);
+  for (const r of result.renamed)    console.log(`  renamed:    "${r.from}" -> "${r.to}"`);
+  for (const d of result.deprecated) console.log(`  deprecated: "${d.name}" (was enabled: ${d.wasEnabled})`);
+
+  return result;
 }
 
-export async function listSourceCategories(sourceId, { enabledOnly = false } = {}) {
+export async function listSourceCategories(sourceId, { enabledOnly = false, includeDeprecated = true } = {}) {
+  const conds = ["source_id=$1"];
+  if (enabledOnly) conds.push("enabled=true");
+  if (!includeDeprecated) conds.push("status='active'");
   const { rows } = await query(
-    `select cat_name, slug, img, product_count, enabled
+    `select cat_name, slug, handle, img, product_count, enabled, status,
+            previous_name, last_seen_at, deprecated_at
        from source_categories
-      where source_id=$1 ${enabledOnly ? "and enabled=true" : ""}
-      order by product_count desc, cat_name asc`,
+      where ${conds.join(" and ")}
+      order by (status='deprecated'), product_count desc, cat_name asc`,
     [sourceId]
   );
   return rows;
