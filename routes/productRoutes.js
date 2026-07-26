@@ -257,11 +257,28 @@ router.get('/allresults', async (req, res) => {
 });
 
 
+// availability is stored inconsistently across scrapers (1 / '1' / true / 'true'
+// / 0 / '0' / NULL). Normalise to text so every row lands in exactly ONE of the
+// in/out buckets. COALESCE is load-bearing: without it a NULL-availability row
+// is invisible to BOTH passes and silently never syncs.
+const AVAIL_TEXT = `LOWER(CAST(COALESCE(availability,'0') AS TEXT))`;
+
 router.get("/sync-feed", requireEnrollmentKey, async (req, res) => {
   const by    = req.query.by === "ts" ? "ts" : "id";
   const after = parseInt(req.query.after, 10) || 0;
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 200);
- 
+
+  // Optional narrowing. All additive, all independent of the keyset cursor, so a
+  // windowed pass still pages deterministically.
+  //   stock=in|out      -> only in-stock / only out-of-stock rows
+  //   updated_days=N    -> productLastUpdated within N days (epoch-ms column)
+  //   created_days=N    -> productDateCreation within N days (UTC text column)
+  const stock = req.query.stock === "in" ? "in"
+              : req.query.stock === "out" ? "out"
+              : "";
+  const updatedDays = Math.max(0, parseFloat(req.query.updated_days) || 0);
+  const createdDays = Math.max(0, parseFloat(req.query.created_days) || 0);
+
   const sources = req.enrollment.sources || [];
  
   // (1) which category/database to read. Defaults to the first source's category
@@ -297,16 +314,36 @@ router.get("/sync-feed", requireEnrollmentKey, async (req, res) => {
     }
     return `(${clause})`;
   });
+
+  // narrowing filters — appended AFTER the source params so placeholder order
+  // stays: [after, ...sourceParams, ...filterParams, limit]
+  const filters = [];
+  if (stock === "in") {
+    filters.push(`${AVAIL_TEXT} IN ('1','true')`);
+  } else if (stock === "out") {
+    filters.push(`${AVAIL_TEXT} NOT IN ('1','true')`);
+  }
+  if (updatedDays > 0) {
+    filters.push(`CAST(productLastUpdated AS INTEGER) >= ?`);
+    params.push(Date.now() - updatedDays * 86400000);
+  }
+  if (createdDays > 0) {
+    // productDateCreation is written by SQLite's DEFAULT CURRENT_TIMESTAMP, so
+    // it is UTC 'YYYY-MM-DD HH:MM:SS' and compares directly against datetime().
+    filters.push(`productDateCreation >= datetime('now', ?)`);
+    params.push(`-${createdDays} days`);
+  }
   params.push(limit);
- 
+
   const sql = `
     SELECT *
       FROM PRODUCTS
      WHERE ${cursorCol} > ?
        AND (${sourceClauses.join(" OR ")})
+       ${filters.length ? "AND " + filters.join(" AND ") : ""}
      ORDER BY ${cursorCol} ASC
      LIMIT ?`;
- 
+
   const dbFile = path.join(DB_FOLDER, `${dbName}.db`);
   let db;
   try {
@@ -317,8 +354,16 @@ router.get("/sync-feed", requireEnrollmentKey, async (req, res) => {
  
     // tag every row with the database it came from (not a column in PRODUCTS)
     for (const row of rows) row.dbName = dbName;
- 
-    res.json({ by, after, count: rows.length, results: rows });
+
+    // echo the applied narrowing back so the plugin can prove the server
+    // honoured it (an older server silently ignores these and returns everything)
+    res.json({
+      by, after, count: rows.length,
+      stock: stock || null,
+      updated_days: updatedDays || null,
+      created_days: createdDays || null,
+      results: rows,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   } finally {
