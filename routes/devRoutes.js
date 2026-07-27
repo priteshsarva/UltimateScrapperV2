@@ -625,6 +625,7 @@ router.get('/clean-old-oos-products', async (req, res) => {
     }
 });
 
+// this marks manually upladoed product as out of stock Beware
 router.get('/outofstock5days', async (req, res) => {
     try {
         const shouldDelete = req.query.delete === 'true';
@@ -745,6 +746,8 @@ router.get('/outofstock5days', async (req, res) => {
         res.status(500).json({ error: "Internal server error", details: error.message });
     }
 });
+// this marks manually upladoed product as out of stock Beware
+
 
 router.get('/checkpoint', async (req, res) => {
     try {
