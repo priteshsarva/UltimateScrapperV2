@@ -114,7 +114,7 @@ async function fetchDataaB(singleUrl, DB) {
 
 
     const browser = await puppeteer.launch({
-        headless: true,
+        headless: "new",
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
         defaultViewport: { width: 1080, height: 800 },
         args: [
