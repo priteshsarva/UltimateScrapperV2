@@ -1,27 +1,35 @@
 // Email via SMTP (nodemailer). Requires: npm install nodemailer
-// Env: SMTP_HOST, SMTP_PORT, SMTP_SECURE ('true' for 465), SMTP_USER, SMTP_PASS,
-//      MAIL_FROM (defaults to SMTP_USER), APP_URL (portal base for pay links).
+// Config now comes from the admin Email settings page (app_settings via
+// portal/settings.js), falling back to SMTP_* / MAIL_FROM env vars. The
+// transport is rebuilt automatically when the config changes, so an admin
+// edit takes effect without a restart.
 import nodemailer from "nodemailer";
+import { getSmtpConfig } from "./settings.js";
 
 const APP_URL = process.env.APP_URL || "http://localhost:5174";
-const FROM = process.env.MAIL_FROM || process.env.SMTP_USER || "no-reply@localhost";
 
 let transport = null;
-function tx() {
-  if (transport) return transport;
+let transportKey = ""; // signature of the config the cached transport was built from
+
+async function tx() {
+  const c = await getSmtpConfig();
+  const key = `${c.host}|${c.port}|${c.secure}|${c.user}|${c.pass}`;
+  if (transport && key === transportKey) return { transport, from: c.from };
   transport = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT || "587", 10),
-    secure: process.env.SMTP_SECURE === "true", // true => port 465
-    auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
+    host: c.host,
+    port: c.port,
+    secure: c.secure, // true => port 465
+    auth: c.user ? { user: c.user, pass: c.pass } : undefined,
   });
-  return transport;
+  transportKey = key;
+  return { transport, from: c.from };
 }
 
-export async function sendMail({ to, subject, html, text }) {
+export async function sendMail({ to, subject, html, text, from }) {
   if (!to) return { ok: false, error: "no recipient" };
   try {
-    await tx().sendMail({ from: FROM, to, subject, html, text: text || undefined });
+    const t = await tx();
+    await t.transport.sendMail({ from: from || t.from, to, subject, html, text: text || undefined });
     return { ok: true };
   } catch (e) {
     console.error("[mail] send failed:", e.message);

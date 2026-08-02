@@ -1,13 +1,15 @@
 // Pay0.shop UPI gateway.
-// Env: PAY0_USER_TOKEN (your merchant API token), PAY0_BASE_URL (default https://pay0.shop/api).
+// Config (base URL + merchant token) now comes from the admin Payment settings
+// page (app_settings via portal/settings.js), falling back to PAY0_BASE_URL /
+// PAY0_USER_TOKEN env vars. Read at call-time so an admin edit takes effect
+// without a restart.
 //
-// IMPORTANT — verify against your Pay0 dashboard Documentation page (it blocks bots,
-// so these are the standard Pay0.shop field names). If your docs differ, change ONLY
-// the endpoint paths / field names below — nothing else in the app depends on them.
-const BASE = (process.env.PAY0_BASE_URL || "https://pay0.shop/api").replace(/\/+$/, "");
-const TOKEN = process.env.PAY0_USER_TOKEN || "";
+// IMPORTANT — the endpoint paths / field names below are Pay0.shop's; change
+// only those if your Pay0 docs differ. Nothing else in the app depends on them.
+import { getPaymentConfig } from "./settings.js";
 
-async function post(path, params) {
+async function post(path, params, baseUrl) {
+  const BASE = (baseUrl || "https://pay0.shop/api").replace(/\/+$/, "");
   const r = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -21,15 +23,16 @@ function truthy(v) { return v === true || String(v).toLowerCase() === "true" || 
 
 // create an order -> { ok, order_id, payment_url, message, raw }
 export async function createOrder({ amount, orderId, customerMobile, redirectUrl, remark }) {
+  const cfg = await getPaymentConfig();
   const res = await post("/create-order", {
     customer_mobile: customerMobile || "",
-    user_token: TOKEN,
+    user_token: cfg.user_token,
     amount: String(amount),
     order_id: orderId,
     redirect_url: redirectUrl || "",
     remark1: remark || "",
     remark2: "",
-  });
+  }, cfg.base_url);
   const result = res.result || res.data || {};
   const payment_url = result.payment_url || result.paymentUrl || null;
   return {
@@ -43,7 +46,8 @@ export async function createOrder({ amount, orderId, customerMobile, redirectUrl
 
 // check an order's status -> { paid, status, utr, amount, raw }
 export async function checkStatus(orderId) {
-  const res = await post("/check-order-status", { user_token: TOKEN, order_id: orderId });
+  const cfg = await getPaymentConfig();
+  const res = await post("/check-order-status", { user_token: cfg.user_token, order_id: orderId }, cfg.base_url);
   const result = res.result || res.data || {};
   const st = String(result.txnStatus || result.status || result.order_status || "").toUpperCase();
   return {

@@ -8,6 +8,7 @@ import {
   listSourceCategories, setCategoryEnabled,
   refreshSourceCategoriesFromDB, scrapeSourceCategories,
 } from "./categories.js";
+import { scrapeCategoriesA, scrapeCategoriesB } from "./scrapeCategories.js";
 
 // ---------- client ----------
 const clientRouter = Router();
@@ -41,6 +42,31 @@ clientRouter.get("/:id/categories", async (req, res) => {
 // ---------- admin ----------
 const adminRouter = Router();
 adminRouter.use(requireAuth, requireAdmin);
+
+// POST /portal/admin/sources/preview   { url, method? }
+// Ad-hoc: scrape the category list from ANY storefront URL WITHOUT creating a
+// source. Read-only — writes nothing to Postgres or SQLite. For testing a site
+// before you approve it. `method` defaults to METHOD_B for jdwebconnect/
+// jdwebnship hosts (the /categories SPA layout), else METHOD_A.
+adminRouter.post("/preview", async (req, res) => {
+  const url = req.body && req.body.url;
+  if (!url) return res.status(400).json({ error: "url required" });
+
+  let method = (req.body && req.body.method || "").toUpperCase();
+  if (method !== "METHOD_A" && method !== "METHOD_B") {
+    method = /jdweb(nship|connect)/i.test(url) ? "METHOD_B" : "METHOD_A";
+  }
+
+  try {
+    const categories = method === "METHOD_B"
+      ? await scrapeCategoriesB(url)
+      : await scrapeCategoriesA(url);
+    res.json({ ok: true, url, method, count: categories.length, categories });
+  } catch (e) {
+    console.error(`[categories] preview failed for ${url}:`, e.message);
+    res.status(500).json({ error: e.message, url, method });
+  }
+});
 
 // GET /portal/admin/sources/:id/categories  -> all, including disabled + deprecated
 adminRouter.get("/:id/categories", async (req, res) => {

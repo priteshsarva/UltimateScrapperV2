@@ -50,6 +50,8 @@ import clientShopRoutes from "./portal/clientShopRoutes.js";
 import categoryMapRoutes from "./portal/categoryMapRoutes.js";
 
 import productRefreshRoute from "./portal/productRefreshRoute.js";
+import { adminSettingsRoutes, publicSettingsRoutes } from "./portal/settingsRoutes.js";
+import adminUsersRoutes from "./portal/adminUsersRoute.js";
 import { sppSyncLogger } from './spp-sync-logger.js';
 
 
@@ -160,6 +162,9 @@ app.use("/portal", paymentRoutes);   // adds /portal/invoices and /portal/pay/ca
 app.use("/portal/admin", domainVerifyRoutes)
 app.use("/portal", clientShopRoutes);
 app.use("/portal", categoryMapRoutes)
+app.use("/portal/admin/settings", adminSettingsRoutes);  // SMTP + payment config
+app.use("/portal/admin", adminUsersRoutes);              // GET /portal/admin/users
+app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-info (non-secret)
 
 startScheduler();
 app.options('*', cors()); // Handle preflight requests for all routes
