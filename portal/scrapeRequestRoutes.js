@@ -5,8 +5,7 @@ import { Router } from "express";
 import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { upsertSource, sanitizeCategory } from "./sources.js";
-import { enqueueScrape } from "./scrapeQueue.js";
-import { scrapeSourceCategories, refreshSourceCategoriesFromDB } from "./categories.js";
+import { scrapeSourceCategories } from "./categories.js";
 
 // ---------- client ----------
 const clientRouter = Router();
@@ -101,7 +100,9 @@ adminRouter.post("/:id/approve", async (req, res) => {
     );
   }
 
-  // 2) categories-first: scrape just the category list now (so the client can pick)
+  // 2) categories-first: scrape just the category list now (so the client can pick).
+  //    gotoWithRetry inside handles the cold-start: a dormant storefront's first
+  //    hit can exceed any timeout; the retry lands on the woken-up site.
   let categoriesFound = 0;
   try {
     categoriesFound = await scrapeSourceCategories(source);
@@ -109,13 +110,14 @@ adminRouter.post("/:id/approve", async (req, res) => {
     console.error("category scrape failed:", source.id, e.message);
   }
 
-  // 3) full bulk scrape in the background through the shared queue;
-  //    refresh category counts from the DB once it finishes.
-  enqueueScrape(source)
-    .then(() => refreshSourceCategoriesFromDB(source.id).catch(() => {}))
-    .catch(() => {});
+  // 3) NO immediate bulk scrape. The source is created with last_scraped_at NULL
+  //    and nextSourceToScrape() orders by `last_scraped_at asc NULLS FIRST`, so
+  //    the ROTATOR picks it up on its next pass — serialized with everything
+  //    else instead of piling a full crawl on top of whatever is running the
+  //    moment an admin clicks Approve. (Category product-counts refresh after
+  //    that scrape completes — see scrapeQueue.js.)
 
-  res.json({ ok: true, source_id: source.id, categoriesFound });
+  res.json({ ok: true, source_id: source.id, categoriesFound, bulkScrape: "queued for next rotator pass" });
 });
 
 // POST /portal/admin/scrape-requests/:id/reject

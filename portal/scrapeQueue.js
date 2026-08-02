@@ -4,6 +4,7 @@
 import PQueue from "p-queue";
 import { executeScraper } from "../core/scraperManager.js";
 import { markScraped } from "./sources.js";
+import { refreshSourceCategoriesFromDB } from "./categories.js";
 
 export const scrapeQueue = new PQueue({ concurrency: 1 });
 
@@ -18,7 +19,13 @@ export function enqueueScrape(source) {
     } catch (err) {
       console.error("Queued scrape failed:", id, err.message);
     } finally {
-      if (id) await markScraped(id).catch(() => {});
+      if (id) {
+        await markScraped(id).catch(() => {});
+        // per-category product counts in the portal, refreshed after EVERY
+        // scrape (used to happen only on the approval path, so rotator passes
+        // never updated them)
+        await refreshSourceCategoriesFromDB(id).catch(() => {});
+      }
     }
   });
 }
