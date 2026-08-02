@@ -1,5 +1,6 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { launchWithPage } from '../launchBrowser.js';
 import * as cheerio from 'cheerio';
 // import { DB } from '../connect.js';
 import fs from 'fs';
@@ -113,7 +114,7 @@ async function fetchDataaB(singleUrl, DB) {
 
 
 
-    const browser = await puppeteer.launch({
+    const { browser, page } = await launchWithPage(puppeteer, {
         headless: "new",
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
         defaultViewport: { width: 1080, height: 800 },
@@ -127,9 +128,7 @@ async function fetchDataaB(singleUrl, DB) {
             '--window-size=1080,800',
             '--start-maximized'
         ]
-    });
-
-    const page = await browser.newPage();
+    }, { label: 'methodB' });
 
     // ✅ Use realistic headers
     await page.setUserAgent(

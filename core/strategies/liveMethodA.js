@@ -1,5 +1,6 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { launchWithPage } from '../launchBrowser.js';
 import { dbManager } from '../../models/dbManager.js'; // Adjust path if needed
 import "dotenv/config";
 
@@ -31,8 +32,10 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
     let deadReason = '';
 
     try {
-        // 👇 FIXED MEMORY LEAK: Removed 'const' so the outer 'browser' variable gets assigned and properly closed in 'finally'
-        browser = await puppeteer.launch({
+        // Launch through the shared retry wrapper (see core/launchBrowser.js) —
+        // '--single-process' removed: with new headless it is the most fragile
+        // Chrome mode and the classic trigger for "Requesting main frame too early".
+        const lp = await launchWithPage(puppeteer, {
             headless: "new", // 'new' uses less RAM than the old 'true' architecture
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
             defaultViewport: { width: 800, height: 600 },
@@ -42,7 +45,6 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                 '--disable-dev-shm-usage', // MUST be included on Linux
                 '--disable-gpu',
                 '--no-zygote',
-                '--single-process', // Warning: Only use if 'new' headless mode is active
                 '--disable-extensions',
                 '--no-first-run',
                 '--disable-background-networking',
@@ -59,9 +61,9 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                 '--safebrowsing-disable-auto-update',
                 '--js-flags=--max-old-space-size=256 --expose-gc' // Force aggressive garbage collection
             ]
-        });
-
-        const page = await browser.newPage();
+        }, { label: 'liveMethodA' });
+        browser = lp.browser;   // outer var so 'finally' still closes it
+        const page = lp.page;
         // Prevent images and fonts from loading in the single scraper to save massive amounts of RAM
         await page.setRequestInterception(true);
         page.on('request', (request) => {

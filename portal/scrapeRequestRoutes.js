@@ -4,7 +4,7 @@
 import { Router } from "express";
 import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
-import { upsertSource } from "./sources.js";
+import { upsertSource, sanitizeCategory } from "./sources.js";
 import { enqueueScrape } from "./scrapeQueue.js";
 import { scrapeSourceCategories, refreshSourceCategoriesFromDB } from "./categories.js";
 
@@ -15,21 +15,19 @@ clientRouter.use(requireAuth);
 // POST /portal/scrape-requests   { site_url, category, enrollment_id? }
 // enrollment_id ties the request to the store that asked; approval auto-attaches.
 clientRouter.post("/", async (req, res) => {
-  const { site_url, category, enrollment_id } = req.body || {};
+  const { site_url, enrollment_id } = req.body || {};
+  // categories are free-form now, but they become SQLite filenames — slug on entry
+  const category = sanitizeCategory(req.body && req.body.category);
   if (!site_url || !category)
-    return res.status(400).json({ error: "site_url and category required" });
+    return res.status(400).json({ error: "site_url and category (letters/digits) required" });
 
-  // if a target store is given, it must belong to this user and match the category
+  // if a target store is given, it must belong to this user.
+  // NO category match check: stores are cross-category (sync-feed pulls each
+  // category from its own DB via ?category=), so a watch store may request a
+  // perfume source — that was the whole point of removing the old restriction.
   if (enrollment_id) {
     const enr = (await query(`select id, user_id from enrollments where id=$1`, [enrollment_id])).rows[0];
     if (!enr || enr.user_id !== req.user.sub) return res.status(404).json({ error: "Enrollment not found" });
-    const existing = (await query(
-      `select s.category from enrollment_sources es join sources s on s.id=es.source_id
-        where es.enrollment_id=$1 limit 1`, [enrollment_id]
-    )).rows[0];
-    if (existing && existing.category !== category) {
-      return res.status(400).json({ error: `That site sells ${existing.category}; this request is for ${category}.` });
-    }
   }
 
   const { rows } = await query(

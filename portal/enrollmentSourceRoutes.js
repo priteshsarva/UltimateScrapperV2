@@ -66,17 +66,10 @@ router.post("/enrollments/:id/sources", asyncH(async (req, res) => {
 
   await ensurePrimary(req.params.id);
 
-  // all sources on a site must share a category (they share one product DB)
-  const existing = (await query(
-    `select s.category from enrollment_sources es join sources s on s.id=es.source_id
-      where es.enrollment_id=$1 limit 1`,
-    [req.params.id]
-  )).rows[0];
-  if (existing && existing.category !== src.category) {
-    return res.status(400).json({
-      error: `This site sells ${existing.category}; cannot add a ${src.category} source.`,
-    });
-  }
+  // Cross-category attach is ALLOWED. The old same-category guard here dated
+  // from when a store read a single product DB; sync-feed has been per-category
+  // since the ?category= param (each category is its own SQLite DB, the plugin
+  // keeps a cursor per category), so a store can mix watches + shoes + anything.
 
   await query(
     `insert into enrollment_sources (enrollment_id, source_id, categories)

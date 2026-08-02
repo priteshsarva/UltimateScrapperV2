@@ -4,6 +4,7 @@
 //   METHOD_B: {base}/categories        ->  div.abs_image_wrapper  (name in img[alt], link in a[href])
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import { launchWithPage } from "../core/launchBrowser.js";
 import "dotenv/config";
 
 puppeteer.use(StealthPlugin());
@@ -17,10 +18,12 @@ const LAUNCH = {
   ],
 };
 
+// Goes through the shared Chrome gate (core/launchBrowser.js) like every other
+// scraper — an admin category re-scrape can no longer add a third browser on
+// top of a bulk crawl and a live refresh.
 async function withPage(fn) {
-  const browser = await puppeteer.launch(LAUNCH);
+  const { browser, page } = await launchWithPage(puppeteer, LAUNCH, { label: "categories" });
   try {
-    const page = await browser.newPage();
     await page.setDefaultNavigationTimeout(45000);
     await page.setRequestInterception(true);
     page.on("request", (r) =>

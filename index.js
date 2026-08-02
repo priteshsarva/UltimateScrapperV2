@@ -4,6 +4,21 @@ import express, { json } from "express";
 import fs from 'fs';
 import path from 'path';
 import cors from 'cors';
+
+// --- Chrome temp on the REAL disk, not the 476MB tmpfs /tmp ---------------------
+// On the VPS /tmp is a small RAM-backed tmpfs. Chrome writes a fresh profile
+// there on every launch; concurrent launches exhausted it and Chrome died with
+// "database or disk is full". Point temp at the big root disk instead.
+try {
+    const bigTmp = path.join(process.cwd(), '.tmp');
+    fs.mkdirSync(bigTmp, { recursive: true });
+    fs.accessSync(bigTmp, fs.constants.W_OK);
+    process.env.TMPDIR = bigTmp;
+    console.log(`🧊 TMPDIR -> ${bigTmp} (Chrome profiles off the tmpfs /tmp)`);
+} catch (e) {
+    console.warn('⚠️ could not set a real-disk TMPDIR, leaving default:', e.message);
+}
+
 import productRoutes from './routes/productRoutes.js'
 import devRoutes from './routes/devRoutes.js'
 

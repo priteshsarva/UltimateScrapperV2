@@ -3,6 +3,21 @@
 // list/config of sources and is what gives admin control + the approval flow.
 import { query } from "./db.js";
 
+// Categories are FREE-FORM now (any niche, not just shoes/watches) — but a
+// category is also a SQLite FILENAME (dbManager opens `<category>.db`), so every
+// write path must slug it. Lowercase, spaces -> '-', strip everything outside
+// [a-z0-9_-], max 40 chars. Returns '' when nothing usable is left.
+export function sanitizeCategory(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 40);
+}
+
 export async function listSources({ status } = {}) {
   const sql = `select * from sources ${status ? "where status=$1" : ""} order by name`;
   const { rows } = await query(sql, status ? [status] : []);
@@ -15,6 +30,10 @@ export async function getSource(id) {
 }
 
 export async function upsertSource(s) {
+  // single choke-point: everything that creates/edits a source funnels through
+  // here (admin routes AND scrape-request approval), so slugging once covers all
+  s = { ...s, category: sanitizeCategory(s.category) };
+  if (!s.category) throw new Error("category must contain at least one letter or digit");
   const { rows } = await query(
     `insert into sources (id, name, category, method, base_url, search_key, status)
      values ($1,$2,$3,$4,$5,$6, coalesce($7,'active'))
