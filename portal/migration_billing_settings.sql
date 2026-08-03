@@ -42,6 +42,9 @@ alter table invoices add column if not exists period_end    timestamptz;
 alter table invoices add column if not exists due_date      timestamptz;
 alter table invoices add column if not exists invoice_no    text;
 alter table invoices add column if not exists last_reminder_at timestamptz;
+-- gateway link, so the plugin's /product/pay-start can persist & reuse a pay URL
+alter table invoices add column if not exists gateway_order_id    text;
+alter table invoices add column if not exists gateway_payment_url text;
 
 -- invoice number sequence + the dedup index billing.js relies on
 create sequence if not exists invoice_no_seq;

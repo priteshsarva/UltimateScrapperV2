@@ -5,7 +5,7 @@ import { Router } from "express";
 import { requireAuth, requireAdmin } from "./auth.js";
 import {
   getSmtpConfig, getSmtpConfigMasked, saveSettings,
-  getPaymentConfig, getPaymentConfigMasked, getPaymentPublic,
+  getPaymentRegistryMasked, savePaymentProvider, setActiveProvider, getPaymentPublic,
 } from "./settings.js";
 import { sendMail } from "./mailer.js";
 
@@ -47,23 +47,28 @@ adminRouter.post("/smtp/test", async (req, res) => {
   else res.status(502).json({ error: r.error });
 });
 
-// Payment (Pay0) — token MASKED on GET; blank/masked token on PUT = keep existing.
+// Payment REGISTRY — GET returns every provider with keys MASKED + which is active.
 adminRouter.get("/payment", async (_req, res) => {
-  try { res.json({ payment: await getPaymentConfigMasked() }); }
+  try { res.json({ payment: await getPaymentRegistryMasked() }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-adminRouter.put("/payment", async (req, res) => {
+// save one provider's fields (blank/masked secrets keep the stored value)
+adminRouter.put("/payment/provider/:id", async (req, res) => {
   const b = req.body || {};
-  const patch = {
-    provider: b.provider || "pay0",
-    base_url: b.base_url || "https://pay0.shop/api",
-    enabled: !!b.enabled,
+  const fields = {
+    label: b.label, title: b.title, description: b.description,
+    base_url: b.base_url, webhook_url: b.webhook_url, enabled: !!b.enabled,
+    api_key: b.api_key, secret: b.secret,
   };
-  if (b.user_token && b.user_token !== "********") patch.user_token = b.user_token;
-  else { const cur = await getPaymentConfig(); patch.user_token = cur.user_token || ""; } // preserve
-  try { await saveSettings("payment", patch); res.json({ ok: true, payment: await getPaymentConfigMasked() }); }
+  try { res.json({ ok: true, payment: await savePaymentProvider(req.params.id, fields) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// choose the live gateway
+adminRouter.put("/payment/active", async (req, res) => {
+  try { res.json({ ok: true, payment: await setActiveProvider((req.body && req.body.id) || "") }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // ---------- public (non-secret) ----------

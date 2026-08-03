@@ -50,6 +50,7 @@ import clientShopRoutes from "./portal/clientShopRoutes.js";
 import categoryMapRoutes from "./portal/categoryMapRoutes.js";
 
 import productRefreshRoute from "./portal/productRefreshRoute.js";
+import pluginPayRoutes from "./portal/pluginPayRoutes.js";
 import { adminSettingsRoutes, publicSettingsRoutes } from "./portal/settingsRoutes.js";
 import adminUsersRoutes from "./portal/adminUsersRoute.js";
 import { sppSyncLogger } from './spp-sync-logger.js';
@@ -177,6 +178,7 @@ app.get('/', async (req, res) => {
 
 });
 app.use("/product", productRefreshRoute);            // new, keyed
+app.use("/product", pluginPayRoutes);                // keyed: /pay-config, /pay-start
 
 app.use("/product", statusRoute);
 app.use('/product', tenantIdentify, productRoutes);
