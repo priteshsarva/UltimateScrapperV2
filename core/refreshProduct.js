@@ -12,6 +12,15 @@ import { scrapeSingleProductMethodB } from "./strategies/LiveMethodB.js";
 
 export const ONE_HOUR_MS = 60 * 60 * 1000;
 
+// How old a product must be before a page view triggers a live re-scrape.
+// Was 1h — far too aggressive: on a busy store, nearly every view was >1h old,
+// so each one queued a Chrome scrape and the 2-slot gate backed up to hundreds
+// "ahead". Widened to 3 days (override with REFRESH_STALE_MS).
+export const STALE_MS = Math.max(
+  ONE_HOUR_MS,
+  parseInt(process.env.REFRESH_STALE_MS, 10) || 3 * 24 * 60 * 60 * 1000
+);
+
 // quick DB lookup (fresh, independent connection) — returns the row or null
 export async function findProduct(productId, dbName, productUrl = null) {
   const dbPath = path.resolve(`./databases/${dbName}.db`);
@@ -29,7 +38,9 @@ export async function findProduct(productId, dbName, productUrl = null) {
 }
 
 export function isStale(product) {
-  return Date.now() - parseInt(product.productLastUpdated) >= ONE_HOUR_MS;
+  const ts = parseInt(product.productLastUpdated);
+  if (!Number.isFinite(ts)) return false; // unknown age -> don't trigger a scrape
+  return Date.now() - ts >= STALE_MS;
 }
 
 // live re-scrape (scraper writes the fresh row back to the DB). Returns fresh data or null.

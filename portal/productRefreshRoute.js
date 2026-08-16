@@ -16,6 +16,13 @@ const refreshing = new Set();
 const lastAttempt = new Map();
 const RETRY_COOLDOWN_MS = 60 * 1000;
 
+// Hard ceiling on background live scrapes in flight at once. With CHROME_MAX=2
+// this keeps the browser gate's waiter queue tiny instead of climbing into the
+// hundreds when a busy store gets crawled. Extra views just return the current
+// row (status "refreshing") without queuing another scrape. Override with
+// REFRESH_MAX_INFLIGHT.
+const MAX_INFLIGHT = Math.max(1, parseInt(process.env.REFRESH_MAX_INFLIGHT, 10) || 4);
+
 // GET /product/refresh-one?productId=70850&category=watches
 router.get("/refresh-one", requireEnrollmentKey, async (req, res) => {
   const domain = (req.enrollment && req.enrollment.domain) || "?";
@@ -64,7 +71,12 @@ router.get("/refresh-one", requireEnrollmentKey, async (req, res) => {
       console.log(`[refresh-one] ${domain} ${url} -> refreshing (scrape already running)`);
     } else if (recentlyTried) {
       console.log(`[refresh-one] ${domain} ${url} -> refreshing (cooldown, skipped new scrape)`);
+    } else if (refreshing.size >= MAX_INFLIGHT) {
+      // gate is saturated — don't pile on. The row is still returned below.
+      console.log(`[refresh-one] ${domain} ${url} -> refreshing (busy: ${refreshing.size}/${MAX_INFLIGHT} in flight, skipped)`);
     } else {
+      // keep the cooldown map from growing without bound over days of traffic
+      if (lastAttempt.size > 20000) lastAttempt.clear();
       refreshing.add(key);
       lastAttempt.set(key, Date.now());
       console.log(`[refresh-one] ${domain} TRIGGERED live scrape: ${url} (id=${productId}, db=${category})`);

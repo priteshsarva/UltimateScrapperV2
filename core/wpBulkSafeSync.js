@@ -19,27 +19,26 @@ const WP_CONSUMER_SECRET = process.env.WP_CONSUMER_SECRET;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export const WP_SITES = [
-  {
-    domain: "timekeepers.in", // <-- MUST MATCH THE KEY IN CLIENT_CONFIGS
-    name: "TimesKeepers",
-    url: process.env.WP_URL,
-    user: process.env.WP_USER,
-    password: process.env.WP_APP_PASSWORD,
-  },
-  {
-    domain: "stylenova.co.in", // <-- MUST MATCH THE KEY IN CLIENT_CONFIGS
-    name: "stylenova",
-    url: process.env.WP_URL_1,
-    user: process.env.WP_USER_1,
-    password: process.env.WP_APP_PASSWORD_1,
-  },
-  // add as many as you need...
-];
+// ─────────────────────────────────────────────────────────────────────────
+// LEGACY DIRECT-PUSH — DISABLED 2026-08.
+// Every client (TimesKeepers, Kicksmania, TheAquaWatch, stylenova) has moved to
+// the plugin / enrollment PULL model (they read /product/sync-feed with a key).
+// The server no longer pushes/deletes products into WooCommerce over the REST
+// API. This whole module is kept only so existing imports don't break; every
+// exported side-effecting function early-returns a benign no-op via the guard
+// below. To re-enable direct push: flip DIRECT_PUSH_ENABLED and repopulate
+// WP_SITES.
+// ─────────────────────────────────────────────────────────────────────────
+export const DIRECT_PUSH_ENABLED = false;
+export const WP_SITES = []; // was: timekeepers.in, stylenova.co.in — now all on the plugin
+
+// benign no-op result returned by every push/delete/OOS call while disabled
+const PUSH_OFF = { ok: true, skipped: true, disabled: true };
 
 
 // Add this new function to handle syncs from your scraper ----------New
 export async function syncProductToAllSites(product, productId = null) {
+  if (!DIRECT_PUSH_ENABLED) return true; // legacy push disabled — treat as handled, no retry
   // 1. Figure out if this product is 'watches' or 'shoes'
   const databaseType = getProductDatabaseType(product);
 
@@ -221,6 +220,7 @@ export async function getProductBydetails(property, value, compare, site, page =
 
 // 2. Loop Function to gather ALL matching products safely
 export async function fetchAllMatchingProducts(property, value, compare, site) {
+  if (!DIRECT_PUSH_ENABLED) return []; // legacy push disabled — nothing to gather
   let allProducts = [];
   let page = 1;
   let totalPages = 1;
@@ -240,6 +240,7 @@ export async function fetchAllMatchingProducts(property, value, compare, site) {
 }
 
 export async function deleteProduct(productId, site) {
+  if (!DIRECT_PUSH_ENABLED) return PUSH_OFF; // legacy push disabled
   try {
     // Note: ?force=true skips the trash bin and deletes it permanently
     const endpoint = `${site.url}/wp-json/wc/v3/products/${productId}?force=true`;
@@ -264,6 +265,7 @@ export async function deleteProduct(productId, site) {
 
 
 export async function markProductOutOfStock(productId, site) {
+  if (!DIRECT_PUSH_ENABLED) return true; // legacy push disabled — treat as handled
   try {
     // The endpoint points directly to the product ID without any extra query parameters
     const endpoint = `${site.url}/wp-json/wc/v3/products/${productId}`;
@@ -334,7 +336,7 @@ async function getOrCreateBrand(brandName, site) {
 }
 
 export async function upsertProductSafe(product, site, productId = null) {
-
+  if (!DIRECT_PUSH_ENABLED) return { success: true, skipped: true }; // legacy push disabled
 
   try {
     const sku = (productId ?? product.productId)?.toString()
@@ -558,6 +560,10 @@ export async function upsertProductSafe(product, site, productId = null) {
 // }
 
 export async function bulkSafeSyncProducts(req, res) {
+  if (!DIRECT_PUSH_ENABLED) {
+    console.log("↩️  bulkSafeSyncProducts called but legacy direct-push is DISABLED — no-op.");
+    return res.status(200).json({ ok: true, disabled: true, message: "Direct WooCommerce push is disabled; all clients use the plugin/enrollment pull model." });
+  }
   console.log("🔄 Starting bulk sync (safe mode) from local DB → WooCommerce...");
 
   try {
@@ -741,6 +747,10 @@ export async function bulkSafeSyncProducts(req, res) {
 
 
 export async function BulkProductOutOfStock(req, res) {
+  if (!DIRECT_PUSH_ENABLED) {
+    console.log("↩️  BulkProductOutOfStock called but legacy direct-push is DISABLED — no-op.");
+    return res.status(200).json({ ok: true, disabled: true, message: "Direct WooCommerce push is disabled; all clients use the plugin/enrollment pull model." });
+  }
   console.log("🔄 Starting bulk sync (safe mode) from local DB → WooCommerce...");
 
   try {

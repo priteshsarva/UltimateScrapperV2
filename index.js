@@ -132,6 +132,35 @@ async function runRotator() {
 
 
 
+// --- Self-cleaning Chrome temp -------------------------------------------------
+// Chrome writes a profile dir + crashpad data under TMPDIR (.tmp) on every launch
+// and only cleans it up on a graceful close — crashes/kills leak them, which is
+// why .tmp used to fill and need a manual `rm -rf`. Sweep anything older than 2h
+// (an ACTIVE scrape keeps its profile's mtime fresh, so a live crawl is never
+// touched). Runs as the server process, so it can delete its own root-owned dirs.
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const TMP_SWEEP_AGE_MS = 2 * ONE_HOUR_MS;
+function sweepTmp() {
+    try {
+        const dir = process.env.TMPDIR;
+        if (!dir || !fs.existsSync(dir)) return;
+        const cutoff = Date.now() - TMP_SWEEP_AGE_MS;
+        let removed = 0;
+        for (const name of fs.readdirSync(dir)) {
+            const p = path.join(dir, name);
+            try {
+                if (fs.statSync(p).mtimeMs < cutoff) {
+                    fs.rmSync(p, { recursive: true, force: true });
+                    removed++;
+                }
+            } catch { /* in use or already gone — skip */ }
+        }
+        if (removed) console.log(`🧹 .tmp sweep: removed ${removed} stale Chrome temp item(s)`);
+    } catch (e) {
+        console.warn('⚠️ .tmp sweep failed:', e.message);
+    }
+}
+
 const app = express()
 app.use(express.json());// for parsing application/json
 app.use(sppSyncLogger());
@@ -168,6 +197,8 @@ app.use("/portal/admin", adminUsersRoutes);              // GET /portal/admin/us
 app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-info (non-secret)
 
 startScheduler();
+sweepTmp();                         // clean leftovers from the last run on boot
+setInterval(sweepTmp, ONE_HOUR_MS); // ...and hourly thereafter
 app.options('*', cors()); // Handle preflight requests for all routes
 
 app.get('/', async (req, res) => {
@@ -181,7 +212,7 @@ app.use("/product", productRefreshRoute);            // new, keyed
 app.use("/product", pluginPayRoutes);                // keyed: /pay-config, /pay-start
 
 app.use("/product", statusRoute);
-app.use('/product', tenantIdentify, productRoutes);
+// app.use('/product', tenantIdentify, productRoutes);
 
 app.use("/product", tenantIdentify, productRoutes);  // old system + /dev, unchanged
 
