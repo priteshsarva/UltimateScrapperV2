@@ -53,6 +53,7 @@ import productRefreshRoute from "./portal/productRefreshRoute.js";
 import pluginPayRoutes from "./portal/pluginPayRoutes.js";
 import { adminSettingsRoutes, publicSettingsRoutes } from "./portal/settingsRoutes.js";
 import adminUsersRoutes from "./portal/adminUsersRoute.js";
+import dbMaintenanceRoutes from "./portal/dbMaintenanceRoutes.js";
 import { sppSyncLogger } from './spp-sync-logger.js';
 
 
@@ -194,6 +195,7 @@ app.use("/portal", clientShopRoutes);
 app.use("/portal", categoryMapRoutes)
 app.use("/portal/admin/settings", adminSettingsRoutes);  // SMTP + payment config
 app.use("/portal/admin", adminUsersRoutes);              // GET /portal/admin/users
+app.use("/portal/admin/db", dbMaintenanceRoutes);        // health / repair / archive-stale
 app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-info (non-secret)
 
 startScheduler();
