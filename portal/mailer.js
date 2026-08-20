@@ -98,3 +98,56 @@ export function sendPaymentReceivedEmail(user, shop, invoice) {
       <p>We've received your payment for invoice <b>${invoice.invoice_no}</b>. Your shop <b>${shop.domain}</b> is now active.</p>`),
   });
 }
+
+// ---- storefront order templates (Phase 2) ----
+function itemsTable(items) {
+  return `<table style="width:100%;border-collapse:collapse;margin:16px 0">
+    <tr><th style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;font-size:12px;color:#8a94a6">ITEM</th><th style="text-align:right;padding:8px 0;border-bottom:1px solid #eee;font-size:12px;color:#8a94a6">TOTAL</th></tr>
+    ${items.map(it => `<tr>
+      <td style="padding:8px 0;border-bottom:1px solid #f4f5f7">${it.product_name} × ${it.qty}</td>
+      <td style="padding:8px 0;border-bottom:1px solid #f4f5f7;text-align:right">₹${Number(it.line_total).toLocaleString("en-IN")}</td>
+    </tr>`).join("")}
+  </table>`;
+}
+function addressBlock(a) {
+  if (!a) return "";
+  return `<p style="margin:8px 0;color:#42505f;font-size:13px">
+    ${a.name || ""}<br>${a.line1 || ""}${a.line2 ? ", " + a.line2 : ""}<br>
+    ${[a.city, a.state, a.pincode].filter(Boolean).join(", ")}<br>
+    ${a.phone ? "📞 " + a.phone : ""}
+  </p>`;
+}
+
+// buyer receipt — sent to the shopper's email if given
+export function sendOrderConfirmationEmail({ storeName, buyerName, buyerEmail, orderNo, total, items, address, whatsappUrl }) {
+  if (!buyerEmail) return Promise.resolve({ ok: false, error: "no buyer email" });
+  return sendMail({
+    to: buyerEmail,
+    subject: `Order ${orderNo} received — ${storeName}`,
+    html: layout(`Thanks for your order, ${buyerName || "there"}!`, `
+      <p>We've received your order <b>${orderNo}</b> from <b>${storeName}</b>.</p>
+      ${itemsTable(items)}
+      <p style="margin:8px 0;font-size:16px"><b>Total: ₹${Number(total).toLocaleString("en-IN")}</b></p>
+      <h4 style="margin:18px 0 6px;color:#0E1726">Deliver to</h4>
+      ${addressBlock(address)}
+      ${whatsappUrl ? `<p style="margin:18px 0"><a href="${whatsappUrl}" style="background:#25D366;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;display:inline-block">Send order on WhatsApp</a></p>` : ""}
+      <p style="color:#8a94a6;font-size:12px">The vendor will confirm your order on WhatsApp shortly.</p>`),
+  });
+}
+
+// vendor notification — sent to the vendor's account email
+export function sendOrderNotificationEmail({ vendorEmail, storeName, orderNo, buyerName, buyerPhone, total, items, address }) {
+  if (!vendorEmail) return Promise.resolve({ ok: false, error: "no vendor email" });
+  return sendMail({
+    to: vendorEmail,
+    subject: `🔔 New order ${orderNo} on ${storeName} — ₹${Number(total).toLocaleString("en-IN")}`,
+    html: layout(`New order on ${storeName}`, `
+      <p>You've got a new order <b>${orderNo}</b>.</p>
+      <p><b>${buyerName}</b> · ${buyerPhone}</p>
+      ${itemsTable(items)}
+      <p style="margin:8px 0;font-size:16px"><b>Total: ₹${Number(total).toLocaleString("en-IN")}</b></p>
+      <h4 style="margin:18px 0 6px;color:#0E1726">Deliver to</h4>
+      ${addressBlock(address)}
+      <p style="color:#8a94a6;font-size:12px">Confirm and fulfil this order in your portal Orders tab.</p>`),
+  });
+}

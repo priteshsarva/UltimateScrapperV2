@@ -102,6 +102,52 @@ if [ -n "$CT" ]; then
   echo "$I" | grep -q '"invoices"' && ok "GET /portal/invoices works" || no "invoices endpoint failed" "$I"
 fi
 
+# ---- hosted storefronts (multi-tenant) ----
+# NOT read-only: creates a hosted site, approves/activates it, places a guest
+# order, then deletes the site (cascades away the order/settings/source too).
+# Needs a real source id from your `sources` table and one category db present
+# locally (defaults assume a "watches" source id and category exist).
+hr "9. Hosted storefronts"
+HOSTED_SOURCE_ID="${HOSTED_SOURCE_ID:-}"          # <-- set to a real sources.id (watches category)
+HOSTED_TEST_PRODUCT_ID="${HOSTED_TEST_PRODUCT_ID:-}"  # <-- set to a real productId in that category db
+if [ -n "$AT" ] && [ -n "$HOSTED_SOURCE_ID" ]; then
+  SITE=$(curl -s -X POST "$SERVER/portal/hosted-sites" -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+          -d '{"store_name":"Smoke Test Store"}')
+  SITE_ID=$(echo "$SITE" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"$//')
+  SLUG=$(echo "$SITE" | field slug)
+  [ -n "$SITE_ID" ] && ok "POST /portal/hosted-sites created a pending site ($SLUG)" || no "hosted-site creation failed" "$SITE"
+
+  if [ -n "$SITE_ID" ]; then
+    curl -s -X POST "$SERVER/portal/admin/enrollments/$SITE_ID/approve" -H "Authorization: Bearer $AT" >/dev/null
+    curl -s -X POST "$SERVER/portal/admin/enrollments/$SITE_ID/activate" -H "Authorization: Bearer $AT" >/dev/null
+    curl -s -X PUT "$SERVER/portal/hosted-sites/$SITE_ID/settings" -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+      -d '{"whatsapp":"+919999999999"}' >/dev/null
+    curl -s -X POST "$SERVER/portal/enrollments/$SITE_ID/sources" -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+      -d "{\"source_id\":\"$HOSTED_SOURCE_ID\"}" >/dev/null
+
+    CFG=$(curl -s "$SERVER/store/$SLUG/config")
+    echo "$CFG" | grep -q '"store_name"' && ok "GET /store/:slug/config live after activate" || no "storefront config failed" "$CFG"
+
+    if [ -n "$HOSTED_TEST_PRODUCT_ID" ]; then
+      PROD=$(curl -s "$SERVER/store/$SLUG/products?limit=1")
+      echo "$PROD" | grep -q '"price"' && ok "GET /store/:slug/products returns server-priced items" || warn "no products (check HOSTED_SOURCE_ID's category is scraped)"
+
+      ORD=$(curl -s -X POST "$SERVER/store/$SLUG/orders" -H "Content-Type: application/json" -d "{
+        \"items\":[{\"product_id\":$HOSTED_TEST_PRODUCT_ID,\"db_name\":\"$(echo "$PROD" | field dbName)\",\"qty\":1}],
+        \"address\":{\"name\":\"Smoke Test\",\"phone\":\"9000000000\",\"line1\":\"1 Test St\",\"city\":\"Pune\",\"state\":\"MH\",\"pincode\":\"411001\"}
+      }")
+      echo "$ORD" | grep -q '"wa_url"' && ok "guest checkout returns a WhatsApp handoff URL" || no "order creation failed" "$ORD"
+    else
+      warn "HOSTED_TEST_PRODUCT_ID not set — skipping order creation check"
+    fi
+
+    curl -s -X DELETE "$SERVER/portal/admin/hosted-sites/$SITE_ID" -H "Authorization: Bearer $AT" >/dev/null
+    ok "cleaned up: deleted the smoke-test site"
+  fi
+else
+  warn "ADMIN creds or HOSTED_SOURCE_ID not set — skipping hosted-storefront checks"
+fi
+
 # ---- summary ----
 hr "RESULT"
 echo "  PASS: $PASS   FAIL: $FAIL   WARN: $WARN"

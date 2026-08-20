@@ -56,6 +56,8 @@ import adminUsersRoutes from "./portal/adminUsersRoute.js";
 import dbMaintenanceRoutes from "./portal/dbMaintenanceRoutes.js";
 import archiveRoutes from "./portal/archiveRoutes.js";
 import { sppSyncLogger } from './spp-sync-logger.js';
+import storeRoutes from "./portal/storeRoutes.js";
+import { clientRouter as hostedSiteRoutes, adminRouter as adminHostedSiteRoutes } from "./portal/hostedSiteRoutes.js";
 
 
 // const PORT = process.env.PORT || 5000;
@@ -177,7 +179,7 @@ app.use(cors({
     credentials: false,// Allow credentials (cookies, authorization headers)
 
     methods: 'GET,POST,PUT,DELETE', // Allow specific HTTP methods
-    allowedHeaders: ["Content-Type", "Authorization"]
+    allowedHeaders: ["Content-Type", "Authorization", "X-Store-Host", "x-enrollment-key", "x-site-domain"]
 }));
 
 app.use("/portal/scrape-requests", scrapeRequestRoutes);
@@ -199,6 +201,9 @@ app.use("/portal/admin", adminUsersRoutes);              // GET /portal/admin/us
 app.use("/portal/admin/db", dbMaintenanceRoutes);        // health / repair (admin)
 app.use("/portal", archiveRoutes);                       // archive-stale (NO auth, ?confirm=yes)
 app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-info (non-secret)
+app.use("/store", storeRoutes);                          // public: /store/:slug/* hosted storefronts
+app.use("/portal", hostedSiteRoutes);                     // vendor: /portal/hosted-sites...
+app.use("/portal/admin", adminHostedSiteRoutes);          // admin: /portal/admin/hosted-sites, /orders
 
 startScheduler();
 sweepTmp();                         // clean leftovers from the last run on boot
