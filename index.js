@@ -57,6 +57,7 @@ import dbMaintenanceRoutes from "./portal/dbMaintenanceRoutes.js";
 import archiveRoutes from "./portal/archiveRoutes.js";
 import { sppSyncLogger } from './spp-sync-logger.js';
 import storeRoutes from "./portal/storeRoutes.js";
+import catalogueRoutes from "./portal/catalogueRoutes.js";
 import { clientRouter as hostedSiteRoutes, adminRouter as adminHostedSiteRoutes } from "./portal/hostedSiteRoutes.js";
 
 
@@ -178,7 +179,10 @@ app.use(cors({
     origin: '*', // Allow requests from all origin
     credentials: false,// Allow credentials (cookies, authorization headers)
 
-    methods: 'GET,POST,PUT,DELETE', // Allow specific HTTP methods
+    // PATCH is load-bearing for the portal SPA (admin pause/resume a storefront,
+    // vendor order-status change). Without it the browser blocks those calls at
+    // preflight even though the server implements them — curl works, the UI doesn't.
+    methods: 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
     allowedHeaders: ["Content-Type", "Authorization", "X-Store-Host", "x-enrollment-key", "x-site-domain"]
 }));
 
@@ -203,6 +207,7 @@ app.use("/portal", archiveRoutes);                       // archive-stale (NO au
 app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-info (non-secret)
 app.use("/store", storeRoutes);                          // public: /store/:slug/* hosted storefronts
 app.use("/portal", hostedSiteRoutes);                     // vendor: /portal/hosted-sites...
+app.use("/portal", catalogueRoutes);                      // vendor: /portal/catalogue (research)
 app.use("/portal/admin", adminHostedSiteRoutes);          // admin: /portal/admin/hosted-sites, /orders
 
 startScheduler();

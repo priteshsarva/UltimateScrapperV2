@@ -8,10 +8,33 @@
 // (site_settings) and orders. site_settings is created eagerly at request time
 // (not on approve) so there's nothing to backfill when an admin approves.
 import { Router } from "express";
+import crypto from "crypto";
+import dns from "dns/promises";
 import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
+import { listSiteBrands, productPageUrl } from "./storeRoutes.js";
+
+// The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
+// their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
+// to (a) refuse a vendor claiming a platform-owned name and (b) let resolveStore
+// tell a platform subdomain from a real custom domain. Empty in local dev.
+const PLATFORM_HOST = (process.env.PLATFORM_HOST || "").toLowerCase().replace(/^\.+|\.+$/g, "");
+
+function normalizeDomain(d) {
+  if (!d) return null;
+  let h = String(d).trim().toLowerCase();
+  h = h.replace(/^https?:\/\//, "").replace(/^www\./, "");
+  h = h.split("/")[0].split(":")[0].replace(/\.+$/, "").trim(); // strip path/port/trailing-dot
+  return h || null;
+}
+
+// a real hostname, at least one dot, no spaces
+const isHostname = (h) => /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(h || "");
+
+// is this domain the platform's own (its apex or any subdomain of it)?
+const isPlatformDomain = (h) => !!PLATFORM_HOST && (h === PLATFORM_HOST || h.endsWith("." + PLATFORM_HOST));
 
 function slugify(s) {
   return (String(s || "").toLowerCase().trim()
@@ -75,26 +98,111 @@ clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
   res.json({ sites: rows });
 }));
 
+// GET /portal/hosted-orders?status=&site=  -> ALL orders across the client's
+// hosted storefronts (shop-wise), each tagged with its store name + slug.
+clientRouter.get("/hosted-orders", asyncH(async (req, res) => {
+  const { status, site } = req.query;
+  const params = [req.user.sub];
+  let sql = `select o.*, e.slug, coalesce(s.store_name, e.slug) as store_name
+               from orders o
+               join enrollments e on e.id = o.enrollment_id
+               left join site_settings s on s.enrollment_id = e.id
+              where e.user_id = $1 and e.type = 'hosted'`;
+  if (status) { params.push(status); sql += ` and o.status = $${params.length}`; }
+  if (site) { params.push(site); sql += ` and e.id = $${params.length}`; }
+  sql += ` order by o.created_at desc limit 500`;
+  res.json({ orders: (await query(sql, params)).rows });
+}));
+
+// GET /portal/hosted-analytics  -> dashboard KPIs + a 30-day sales series across
+// all the client's hosted storefronts.
+clientRouter.get("/hosted-analytics", asyncH(async (req, res) => {
+  const uid = req.user.sub;
+  const totals = (await query(
+    `select count(*)::int as orders,
+            coalesce(sum(o.total),0) as sales,
+            coalesce(sum(o.total) filter (where o.created_at::date = current_date),0) as today_sales,
+            count(*) filter (where o.created_at::date = current_date)::int as today_orders,
+            coalesce(sum(o.total) filter (where o.status <> 'cancelled'),0) as net_sales
+       from orders o join enrollments e on e.id = o.enrollment_id
+      where e.user_id = $1 and e.type = 'hosted'`,
+    [uid]
+  )).rows[0];
+  const series = (await query(
+    `select o.created_at::date as d, coalesce(sum(o.total),0) as sales, count(*)::int as orders
+       from orders o join enrollments e on e.id = o.enrollment_id
+      where e.user_id = $1 and e.type = 'hosted' and o.created_at >= current_date - interval '29 days'
+      group by 1 order by 1`,
+    [uid]
+  )).rows;
+  const sites = (await query(
+    `select e.id, e.slug, e.status, coalesce(s.store_name, e.slug) as store_name,
+            count(o.*)::int as order_count, coalesce(sum(o.total),0) as sales
+       from enrollments e
+       left join site_settings s on s.enrollment_id = e.id
+       left join orders o on o.enrollment_id = e.id
+      where e.user_id = $1 and e.type = 'hosted'
+      group by e.id, e.slug, e.status, s.store_name
+      order by e.created_at desc`,
+    [uid]
+  )).rows;
+  res.json({ totals, series, sites });
+}));
+
 // PUT /portal/hosted-sites/:id/custom-domain  { domain: 'aquawatch.com' | '' }
-// Vendor sets/clears the domain. Setting it resets verification — the platform
-// admin must confirm DNS points at the host before shoppers resolve through it.
+// Vendor sets/clears the domain. Setting it issues a fresh verify token and
+// resets verification — the vendor must prove control of the domain (TXT record
+// or well-known file, see the verify route) before shoppers resolve through it.
 clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const domain = normalizeDomain(req.body?.domain);
+
+  if (domain) {
+    if (!isHostname(domain)) return res.status(400).json({ error: "That doesn't look like a valid domain." });
+    if (isPlatformDomain(domain)) return res.status(400).json({ error: "You can't claim a platform domain." });
+  }
+  // a new/changed domain gets a fresh secret; clearing removes it
+  const token = domain ? "spp-verify-" + crypto.randomBytes(16).toString("hex") : null;
+
   try {
     const { rows } = await query(
       `update enrollments
           set custom_domain = $1,
-              custom_domain_verified_at = null
-        where id = $2 and type = 'hosted'
-        returning custom_domain, custom_domain_verified_at`,
-      [domain, req.params.id]
+              custom_domain_verified_at = null,
+              domain_verify_token = $2
+        where id = $3 and type = 'hosted'
+        returning custom_domain, custom_domain_verified_at, domain_verify_token`,
+      [domain, token, req.params.id]
     );
-    res.json({ ok: true, ...rows[0] });
+    const r = rows[0] || {};
+    res.json({
+      ok: true,
+      ...r,
+      // instructions the portal shows the vendor
+      verify: domain ? {
+        txt_name: `_spp-verify.${domain}`,
+        txt_value: r.domain_verify_token,
+        wellknown_url: `https://${domain}/.well-known/spp-verify`,
+        wellknown_value: r.domain_verify_token,
+      } : null,
+    });
   } catch (err) {
     if (err.code === "23505") return res.status(409).json({ error: "That domain is already in use by another site" });
     throw err;
   }
+}));
+
+// POST /portal/hosted-sites/:id/verify-domain — vendor self-verify (they own DNS)
+clientRouter.post("/hosted-sites/:id/verify-domain", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const enr = (await query(
+    `select id, custom_domain, domain_verify_token from enrollments where id=$1`,
+    [req.params.id]
+  )).rows[0];
+  const { ok, note } = await verifyCustomDomain(enr);
+  if (!ok) return res.status(400).json({ error: "Not verified yet", note });
+  await query(`update enrollments set custom_domain_verified_at = now() where id=$1`, [enr.id]);
+  res.json({ ok: true, note });
 }));
 
 // GET/PUT /portal/hosted-sites/:id/settings  -> the branding pack
@@ -105,16 +213,8 @@ clientRouter.get("/hosted-sites/:id/settings", asyncH(async (req, res) => {
 }));
 
 const SETTINGS_FIELDS = ["store_name", "logo_url", "theme", "whatsapp", "email", "phone",
-  "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics"];
-const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics"]);
-
-function normalizeDomain(d) {
-  if (!d) return null;
-  let h = String(d).trim().toLowerCase();
-  h = h.replace(/^https?:\/\//, "").replace(/^www\./, "");
-  h = h.split("/")[0].split(":")[0].trim();
-  return h || null;
-}
+  "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics", "nav", "preset"];
+const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics", "nav"]);
 
 clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
@@ -136,6 +236,71 @@ clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   res.json({ settings: rows[0] });
 }));
 
+// GET /portal/hosted-sites/:id/sources -> the product sources feeding this site.
+//   { available: [{id,name,category}], attached: [id...], categories: [db...] }
+// `available` is every active source the vendor can pick from; `attached` is the
+// current selection; `categories` = the distinct SQLite DBs those attached
+// sources write to (what the storefront nav/home can group by).
+clientRouter.get("/hosted-sites/:id/sources", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const available = (await query(
+    `select id, name, category from sources where status='active' order by category, name`
+  )).rows;
+  const attached = (await query(
+    `select source_id from enrollment_sources where enrollment_id=$1`, [req.params.id]
+  )).rows.map((r) => r.source_id);
+  const attachedSet = new Set(attached);
+  const categories = [...new Set(available.filter((s) => attachedSet.has(s.id)).map((s) => s.category))];
+  res.json({ available, attached, categories });
+}));
+
+// PUT /portal/hosted-sites/:id/sources  { source_ids: [...] }
+// Replaces the site's whole source selection. Adds keep an empty category
+// allow-list (= all of that source's categories). Ignores unknown/paused ids.
+clientRouter.put("/hosted-sites/:id/sources", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const wanted = Array.isArray(req.body?.source_ids) ? [...new Set(req.body.source_ids.map(String))] : null;
+  if (!wanted) return res.status(400).json({ error: "source_ids array required" });
+
+  // keep only ids that are real + active — never trust the client's list blindly
+  const valid = wanted.length
+    ? (await query(`select id from sources where status='active' and id = any($1)`, [wanted])).rows.map((r) => r.id)
+    : [];
+  const validSet = new Set(valid);
+
+  const current = (await query(
+    `select source_id from enrollment_sources where enrollment_id=$1`, [req.params.id]
+  )).rows.map((r) => r.source_id);
+  const currentSet = new Set(current);
+
+  const toAdd = valid.filter((id) => !currentSet.has(id));
+  const toRemove = current.filter((id) => !validSet.has(id));
+
+  for (const id of toAdd) {
+    await query(
+      `insert into enrollment_sources (enrollment_id, source_id, categories) values ($1,$2,'{}')
+       on conflict (enrollment_id, source_id) do nothing`,
+      [req.params.id, id]
+    );
+  }
+  if (toRemove.length) {
+    await query(
+      `delete from enrollment_sources where enrollment_id=$1 and source_id = any($2)`,
+      [req.params.id, toRemove]
+    );
+  }
+  res.json({ ok: true, attached: valid });
+}));
+
+// GET /portal/hosted-sites/:id/brands?category=  -> in-stock brands the vendor
+// can feature for that category (same list shoppers can filter by).
+clientRouter.get("/hosted-sites/:id/brands", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const category = (req.query.category || "").toString();
+  if (!category) return res.json({ brands: [] });
+  res.json({ brands: await listSiteBrands(req.params.id, category) });
+}));
+
 // GET /portal/hosted-sites/presets  -> shipped homepage presets
 // Static list, no auth-per-site check needed — same set for every vendor.
 clientRouter.get("/hosted-sites/presets", asyncH(async (req, res) => {
@@ -152,8 +317,8 @@ clientRouter.post("/hosted-sites/:id/presets/:preset", asyncH(async (req, res) =
   const preset = PRESETS[req.params.preset];
   if (!preset) return res.status(404).json({ error: "Unknown preset" });
   const { rows } = await query(
-    `update site_settings set sections=$1, updated_at=now() where enrollment_id=$2 returning sections`,
-    [JSON.stringify(preset.sections), req.params.id]
+    `update site_settings set sections=$1, preset=$3, updated_at=now() where enrollment_id=$2 returning sections`,
+    [JSON.stringify(preset.sections), req.params.id, req.params.preset]
   );
   res.json({ ok: true, sections: rows[0]?.sections || [] });
 }));
@@ -177,7 +342,9 @@ clientRouter.get("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) =>
     [req.params.orderId, req.params.id]
   )).rows[0];
   if (!order) return res.status(404).json({ error: "Order not found" });
-  const items = (await query(`select * from order_items where order_id=$1`, [order.id])).rows;
+  const slug = (await query(`select slug from enrollments where id=$1`, [req.params.id])).rows[0]?.slug;
+  const items = (await query(`select * from order_items where order_id=$1`, [order.id])).rows
+    .map((it) => ({ ...it, page_url: slug ? productPageUrl({ slug }, it.db_name, it.product_id) : null }));
   res.json({ order, items });
 }));
 
@@ -216,38 +383,47 @@ adminRouter.get("/hosted-sites", asyncH(async (req, res) => {
   res.json({ sites: rows });
 }));
 
+// Shared token-verification so an admin OR the owning vendor can verify a
+// domain. Proves the claimant controls the domain by requiring the per-site
+// secret token to appear in EITHER a DNS TXT record `_spp-verify.<domain>` OR
+// the file `https://<domain>/.well-known/spp-verify`. A generic page marker
+// (the old check) proved nothing — every React site returns it, so any vendor
+// could verify any domain. Returns { ok, note }.
+async function verifyCustomDomain(enr) {
+  if (!enr.custom_domain) return { ok: false, note: "No custom domain set" };
+  if (!enr.domain_verify_token) return { ok: false, note: "No verification token — re-save the domain to issue one" };
+  const token = enr.domain_verify_token;
+
+  // 1) DNS TXT — the robust check; doesn't require the domain to serve anything.
+  try {
+    const records = await dns.resolveTxt(`_spp-verify.${enr.custom_domain}`);
+    if (records.flat().some((v) => v.trim() === token)) return { ok: true, note: "verified via DNS TXT" };
+  } catch { /* no record / NXDOMAIN — fall through to the file check */ }
+
+  // 2) well-known file — for hosts where the vendor can't easily add TXT.
+  try {
+    const r = await fetch(`https://${enr.custom_domain}/.well-known/spp-verify`, { redirect: "follow" });
+    if (r.ok) {
+      const body = (await r.text()).trim();
+      if (body === token) return { ok: true, note: "verified via well-known file" };
+    }
+    return { ok: false, note: `token not found — add the DNS TXT record or the /.well-known/spp-verify file` };
+  } catch (e) {
+    return { ok: false, note: `could not verify ${enr.custom_domain}: no TXT record and the file couldn't be fetched (${e.message})` };
+  }
+}
+
 // POST /portal/admin/hosted-sites/:id/verify-custom-domain
-// Confirms DNS actually points at the platform host. We check by GETting a
-// well-known probe URL on the domain and confirming it returns THIS backend's
-// standard health payload — same idea as the plugin domain-verify flow.
-// If the vendor hasn't pointed DNS yet, the fetch either fails or returns
-// something we don't recognise and we say so.
 adminRouter.post("/hosted-sites/:id/verify-custom-domain", asyncH(async (req, res) => {
   const enr = (await query(
-    `select id, custom_domain from enrollments where id=$1 and type='hosted'`,
+    `select id, custom_domain, domain_verify_token from enrollments where id=$1 and type='hosted'`,
     [req.params.id]
   )).rows[0];
   if (!enr) return res.status(404).json({ error: "Site not found" });
-  if (!enr.custom_domain) return res.status(400).json({ error: "No custom domain set" });
 
-  // Fetch the SPA at the domain's root and look for our storefront marker.
-  // Cheap and reliable: if a Vite build of site/ is being served there, the
-  // built HTML contains `<div id="root"></div>`. We don't need a fancier probe.
-  let ok = false, note = "";
-  try {
-    const r = await fetch(`https://${enr.custom_domain}/`, { redirect: "follow" });
-    const body = await r.text();
-    ok = r.ok && body.includes('<div id="root"></div>');
-    note = ok ? "domain serves the storefront" : `HTTP ${r.status}, storefront marker not found`;
-  } catch (e) {
-    note = `could not reach https://${enr.custom_domain}/ — ${e.message}`;
-  }
+  const { ok, note } = await verifyCustomDomain(enr);
   if (!ok) return res.status(400).json({ error: "Verification failed", note });
-
-  await query(
-    `update enrollments set custom_domain_verified_at = now() where id=$1`,
-    [enr.id]
-  );
+  await query(`update enrollments set custom_domain_verified_at = now() where id=$1`, [enr.id]);
   res.json({ ok: true, note });
 }));
 

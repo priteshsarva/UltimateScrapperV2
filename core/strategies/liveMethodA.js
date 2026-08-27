@@ -144,8 +144,10 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                         // --- PRICE ---
                         const priceEl = document.querySelector(".s_product_text #price_div h1");
                         if (priceEl && priceEl.textContent) {
-                            const match = priceEl.textContent.match(/\d+/);
-                            if (match) productOriginalPrice = parseInt(match[0], 10);
+                            // strip currency/commas like the bulk crawler — /\d+/ alone
+                            // truncated "₹6,200" to 6, overwriting the real price with 6
+                            const n = priceEl.textContent.replace(/[^0-9.]/g, "");
+                            if (n) productOriginalPrice = parseFloat(n);
                         }
 
                         // --- AVAILABILITY (STOCK) ---

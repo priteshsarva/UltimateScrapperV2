@@ -132,9 +132,9 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
                     const priceEl = document.querySelector(".product-right .price-wrapper span.font-bold");
                     let productOriginalPrice = null;
                     if (priceEl && priceEl.textContent) {
-                        // Extracts digits, e.g., "₹350.00" -> 350
-                        const match = priceEl.textContent.match(/\d+/);
-                        if (match) productOriginalPrice = parseInt(match[0], 10);
+                        // strip currency/commas — /\d+/ alone truncated "₹6,200" to 6
+                        const n = priceEl.textContent.replace(/[^0-9.]/g, "");
+                        if (n) productOriginalPrice = parseFloat(n);
                     }
 
                     // --- AVAILABILITY (STOCK) ---

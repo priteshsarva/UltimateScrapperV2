@@ -28,19 +28,21 @@ router.post("/signup", async (req, res) => {
   } = req.body || {};
 
   if (!email || !password) return res.status(400).json({ error: "email and password required" });
-  if (!shop_url) return res.status(400).json({ error: "shop URL required" });
-  if (!plan_id) return res.status(400).json({ error: "please choose a plan" });
 
-  const domain = normDomain(shop_url);
-  if (!domain) return res.status(400).json({ error: "invalid shop URL" });
+  // Plugin-shop signup (shop_url + plan) is now OPTIONAL — the platform is
+  // storefront-first, so a new user just needs email + password. If they DO
+  // supply a shop_url + plan, we still create that legacy plugin enrollment.
+  const wantShop = !!(shop_url && plan_id);
+  const domain = wantShop ? normDomain(shop_url) : null;
+  if (wantShop && !domain) return res.status(400).json({ error: "invalid shop URL" });
 
   const client = await pool.connect();
   try {
     if ((await client.query(`select 1 from users where email=$1`, [email])).rowCount)
-      return res.status(409).json({ error: "Email already registered" });
-    if ((await client.query(`select 1 from enrollments where lower(domain)=lower($1)`, [domain])).rowCount)
+      return res.status(409).json({ error: "That email is already registered — please sign in instead." });
+    if (wantShop && (await client.query(`select 1 from enrollments where lower(domain)=lower($1)`, [domain])).rowCount)
       return res.status(409).json({ error: "That shop domain is already registered" });
-    if (!(await client.query(`select 1 from plans where id=$1 and active=true`, [plan_id])).rowCount)
+    if (wantShop && !(await client.query(`select 1 from plans where id=$1 and active=true`, [plan_id])).rowCount)
       return res.status(400).json({ error: "Invalid plan" });
 
     const hash = await hashPassword(password);
@@ -56,15 +58,18 @@ router.post("/signup", async (req, res) => {
        social_urls ? JSON.stringify(social_urls) : "{}"]
     )).rows[0];
 
-    const shop = (await client.query(
-      `insert into enrollments (user_id, domain, plan_id, enrollment_key, status)
-       values ($1,$2,$3,$4,'pending')
-       returning id, domain, status, enrollment_key`,
-      [user.id, domain, plan_id, generateEnrollmentKey()]
-    )).rows[0];
+    let shop = null;
+    if (wantShop) {
+      shop = (await client.query(
+        `insert into enrollments (user_id, domain, plan_id, enrollment_key, status)
+         values ($1,$2,$3,$4,'pending')
+         returning id, domain, status, enrollment_key`,
+        [user.id, domain, plan_id, generateEnrollmentKey()]
+      )).rows[0];
+    }
 
     await client.query("COMMIT");
-    sendWelcomeEmail(user, shop).catch(() => {});
+    if (shop) sendWelcomeEmail(user, shop).catch(() => {});
     res.json({ token: signToken(user), user, shop });
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch (_) {}
