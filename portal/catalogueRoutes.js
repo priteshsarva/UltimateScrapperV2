@@ -34,7 +34,13 @@ router.get("/catalogue", async (req, res) => {
   try {
     const q = (req.query.q || "").toString().trim().toLowerCase();
     const cat = (req.query.category || "").toString();
-    const cats = CATEGORIES.includes(cat) ? [cat] : CATEGORIES;
+    const stock = (req.query.stock || "").toString();        // in | out | "" (all)
+    const size = (req.query.size || "").toString().trim();
+    const brand = (req.query.brand || "").toString().trim().toLowerCase();
+    const source = (req.query.source || "").toString();
+    const sort = (req.query.sort || "").toString();
+    const priceMin = parseFloat(req.query.price_min);
+    const priceMax = parseFloat(req.query.price_max);
     const limit = Math.min(parseInt(req.query.limit, 10) || 24, 60);
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const offset = (page - 1) * limit;
@@ -43,18 +49,42 @@ router.get("/catalogue", async (req, res) => {
     const sourceFor = (fetchedFrom, category) =>
       sources.find((s) => s.category === category && s.search_key && fetchedFrom && String(fetchedFrom).includes(s.search_key));
 
-    const where = [`CAST(productOriginalPrice AS REAL) > 0`];
-    const params = [];
-    if (q) { where.push(`(LOWER(productName) LIKE ? OR LOWER(productBrand) LIKE ?)`); params.push(`%${q}%`, `%${q}%`); }
-    const whereSql = where.join(" AND ");
+    // a selected source pins the category + its own products
+    const srcRow = source ? sources.find((s) => s.id === source) : null;
+    let cats = CATEGORIES.includes(cat) ? [cat] : CATEGORIES;
+    if (srcRow) cats = [srcRow.category];
+
+    const AV = `LOWER(CAST(COALESCE(availability,'0') AS TEXT))`;
+    const SORTS = {
+      newest: "productLastUpdated DESC",
+      price_asc: "CAST(productOriginalPrice AS REAL) ASC",
+      price_desc: "CAST(productOriginalPrice AS REAL) DESC",
+      name: "productName COLLATE NOCASE ASC",
+    };
+    const orderBy = SORTS[sort] || SORTS.newest;
+
+    const buildWhere = () => {
+      const where = [`CAST(productOriginalPrice AS REAL) > 0`];
+      const params = [];
+      if (q) { where.push(`(LOWER(productName) LIKE ? OR LOWER(productBrand) LIKE ?)`); params.push(`%${q}%`, `%${q}%`); }
+      if (stock === "in") where.push(`${AV} IN ('1','true')`);
+      else if (stock === "out") where.push(`${AV} NOT IN ('1','true')`);
+      if (size) { where.push(`sizeName LIKE ?`); params.push(`%"${size}"%`); } // sizeName is a JSON array
+      if (brand) { where.push(`LOWER(productBrand) LIKE ?`); params.push(`%${brand}%`); }
+      if (isFinite(priceMin)) { where.push(`CAST(productOriginalPrice AS REAL) >= ?`); params.push(priceMin); }
+      if (isFinite(priceMax)) { where.push(`CAST(productOriginalPrice AS REAL) <= ?`); params.push(priceMax); }
+      if (srcRow) { where.push(`productFetchedFrom LIKE ?`); params.push(`%${srcRow.search_key}%`); }
+      return { clause: where.join(" AND "), params };
+    };
     const need = offset + limit + 1;
 
     const lists = await Promise.all(cats.map(async (c) => {
+      const { clause, params } = buildWhere();
       const rows = await runReadonly(
         c,
         `SELECT productId, productName, productBrand, productOriginalPrice, productUrl, productFetchedFrom,
                 featuredimg, imageUrl, sizeName, catName, availability
-           FROM PRODUCTS WHERE ${whereSql} ORDER BY productLastUpdated DESC LIMIT ?`,
+           FROM PRODUCTS WHERE ${clause} ORDER BY ${orderBy} LIMIT ?`,
         [...params, need]
       ).catch(() => []);
       return rows.map((r) => {
@@ -76,10 +106,18 @@ router.get("/catalogue", async (req, res) => {
       });
     }));
 
-    // round-robin merge so categories interleave, then page over the merged set
-    let merged = [];
-    const total = lists.reduce((n, l) => n + l.length, 0);
-    for (let i = 0; merged.length < total; i++) for (const l of lists) if (l[i]) merged.push(l[i]);
+    // merge the per-category lists. For price/name sorts, sort the merged set so
+    // the ordering holds across categories; for "newest" (default) interleave
+    // round-robin so both categories are represented near the top.
+    let merged;
+    if (sort === "price_asc") merged = [].concat(...lists).sort((a, b) => a.original_price - b.original_price);
+    else if (sort === "price_desc") merged = [].concat(...lists).sort((a, b) => b.original_price - a.original_price);
+    else if (sort === "name") merged = [].concat(...lists).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    else {
+      merged = [];
+      const total = lists.reduce((n, l) => n + l.length, 0);
+      for (let i = 0; merged.length < total; i++) for (const l of lists) if (l[i]) merged.push(l[i]);
+    }
     const pageRows = merged.slice(offset, offset + limit);
     res.json({ page, count: pageRows.length, hasMore: merged.length > offset + limit, results: pageRows });
   } catch (e) {
