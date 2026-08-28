@@ -5,3 +5,6 @@ create table if not exists brand_map (
   canonical  text not null,
   updated_at timestamptz not null default now()
 );
+
+-- primary/secondary (sub-brand) support
+alter table brand_map add column if not exists secondary text;

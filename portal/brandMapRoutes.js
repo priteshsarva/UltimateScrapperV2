@@ -22,22 +22,23 @@ const readAll = (dbName, sql, p = []) => new Promise((resolve) => {
 const router = Router();
 router.use(requireAuth, requireAdmin);
 
-// GET /portal/admin/brand-map -> all mappings
+// GET /portal/admin/brand-map -> all mappings (canonical = primary brand)
 router.get("/brand-map", async (_req, res) => {
-  try { res.json({ mappings: (await query(`select raw, canonical, updated_at from brand_map order by canonical, raw`)).rows }); }
+  try { res.json({ mappings: (await query(`select raw, canonical, secondary, updated_at from brand_map order by canonical, secondary nulls first, raw`)).rows }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// PUT /portal/admin/brand-map  { raw, canonical }  -> upsert
+// PUT /portal/admin/brand-map  { raw, canonical (primary), secondary? }  -> upsert
 router.put("/brand-map", async (req, res) => {
   const raw = (req.body?.raw || "").toString().trim();
   const canonical = (req.body?.canonical || "").toString().trim();
-  if (!raw || !canonical) return res.status(400).json({ error: "raw and canonical required" });
+  const secondary = (req.body?.secondary || "").toString().trim() || null;
+  if (!raw || !canonical) return res.status(400).json({ error: "raw and primary brand required" });
   try {
     await query(
-      `insert into brand_map (raw, canonical) values ($1,$2)
-       on conflict (raw) do update set canonical = excluded.canonical, updated_at = now()`,
-      [raw.toLowerCase(), canonical]
+      `insert into brand_map (raw, canonical, secondary) values ($1,$2,$3)
+       on conflict (raw) do update set canonical = excluded.canonical, secondary = excluded.secondary, updated_at = now()`,
+      [raw.toLowerCase(), canonical, secondary]
     );
     invalidateBrandMap();
     res.json({ ok: true });

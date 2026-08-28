@@ -177,6 +177,7 @@ function priceRow(row, dbName, pricing) {
     dbName,
     productName: row.productName,
     productBrand: row.productBrand,
+    subBrand: row.subBrand || null, // secondary/sub-brand from the global brand map
     catName: row.catName,
     sizes: parseSizes(row),
     thumbnail: row.featuredimg || images[0] || null,
@@ -592,6 +593,7 @@ router.get("/:slug/products/:dbName/:id", resolveStore, asyncH(async (req, res) 
     [row.catName, id, ...simParams]
   ).catch(() => []);
 
+  await applyBrandToRows([row, ...similar]); // global brand map → primary brand + sub-brand
   res.json({
     product: priceRow(applyCatMap(row, catSources), dbName, site.pricing),
     similar: similar.map((r) => priceRow(applyCatMap(r, catSources), dbName, site.pricing)),
