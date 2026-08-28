@@ -6,7 +6,7 @@ import { requireAuth, requireAdmin } from "./auth.js";
 import { getSource, listSources } from "./sources.js";
 import {
   listSourceCategories, setCategoryEnabled,
-  refreshSourceCategoriesFromDB, scrapeSourceCategories,
+  refreshSourceCategoriesFromDB, refreshAllSourceCategoriesFromDB, scrapeSourceCategories,
 } from "./categories.js";
 import { scrapeCategoriesA, scrapeCategoriesB } from "./scrapeCategories.js";
 
@@ -65,6 +65,18 @@ adminRouter.post("/preview", async (req, res) => {
   } catch (e) {
     console.error(`[categories] preview failed for ${url}:`, e.message);
     res.status(500).json({ error: e.message, url, method });
+  }
+});
+
+// POST /portal/admin/sources/categories/refresh-all  -> re-derive EVERY source's
+// categories (+ counts, + in-stock) from the stored products, and zero stale ones.
+adminRouter.post("/categories/refresh-all", async (req, res) => {
+  try {
+    const n = await refreshAllSourceCategoriesFromDB();
+    res.json({ ok: true, categories: n });
+  } catch (e) {
+    console.error("[categories] refresh-all failed:", e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
