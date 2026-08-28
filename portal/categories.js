@@ -133,6 +133,14 @@ export async function refreshSourceCategoriesFromDB(sourceId, { silent = false }
       where source_id = $1 and (cardinality($2::text[]) = 0 or cat_name <> all($2))`,
     [sourceId, names]
   );
+
+  // Auto-enable/disable by stock: a category with NO in-stock products is
+  // disabled (drops out of the vendor picker + storefront); it re-enables when
+  // it has stock again. This is a stock-driven catalogue, so enabled tracks stock.
+  await query(
+    `update source_categories set enabled = (in_stock_count > 0), updated_at = now() where source_id = $1`,
+    [sourceId]
+  );
   return cats.length;
 }
 
