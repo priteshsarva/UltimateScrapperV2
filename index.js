@@ -58,6 +58,7 @@ import archiveRoutes from "./portal/archiveRoutes.js";
 import { sppSyncLogger } from './spp-sync-logger.js';
 import storeRoutes from "./portal/storeRoutes.js";
 import catalogueRoutes from "./portal/catalogueRoutes.js";
+import notificationRoutes from "./portal/notificationRoutes.js";
 import { clientRouter as hostedSiteRoutes, adminRouter as adminHostedSiteRoutes } from "./portal/hostedSiteRoutes.js";
 
 
@@ -208,6 +209,7 @@ app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-
 app.use("/store", storeRoutes);                          // public: /store/:slug/* hosted storefronts
 app.use("/portal", hostedSiteRoutes);                     // vendor: /portal/hosted-sites...
 app.use("/portal", catalogueRoutes);                      // vendor: /portal/catalogue (research)
+app.use("/portal", notificationRoutes);                   // /portal/notifications
 app.use("/portal/admin", adminHostedSiteRoutes);          // admin: /portal/admin/hosted-sites, /orders
 
 startScheduler();

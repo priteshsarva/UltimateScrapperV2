@@ -17,6 +17,7 @@ import { query, pool } from "./db.js";
 import { getSource, listSources } from "./sources.js";
 import { scrapeCategoriesA, scrapeCategoriesB } from "./scrapeCategories.js";
 import { reconcileCategories } from "./reconcileCategories.js";
+import { notify } from "./notifications.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // databases/ sits at the server root (sibling of portal/). Adjust if yours differs.
@@ -103,11 +104,26 @@ async function upsertCategories(sourceId, cats, { withCount = true } = {}) {
 
 // Existing source: instant, from products already in SQLite.
 // Refreshes counts. Does NOT deprecate — see the note at the top of this file.
-export async function refreshSourceCategoriesFromDB(sourceId) {
+export async function refreshSourceCategoriesFromDB(sourceId, { silent = false } = {}) {
   const source = await getSource(sourceId);
   if (!source) throw new Error("Source not found");
+  const existing = new Set((await query(`select cat_name from source_categories where source_id=$1`, [sourceId])).rows.map((r) => r.cat_name));
   const cats = await readCategoriesFromDB(source);
   await upsertCategories(sourceId, cats, { withCount: true });
+
+  // Notify clients + admin about genuinely NEW categories on this source (they're
+  // auto-added above). Skipped in bulk/silent runs to avoid a notification storm.
+  if (!silent) {
+    for (const c of cats.filter((c) => !existing.has(c.name))) {
+      await notify({
+        type: "new_category",
+        audience: "all_clients",
+        title: `New category on ${source.name}`,
+        body: `"${c.name}" — ${c.count} product${c.count === 1 ? "" : "s"} (added automatically).`,
+        meta: { source_id: sourceId, source_name: source.name, cat_name: c.name, count: c.count },
+      }).catch(() => {});
+    }
+  }
   // Correct stale rows: any stored category with NO products in the DB any more
   // gets zeroed (total + in-stock), so it surfaces as "no products" instead of a
   // wrong old count. We zero rather than delete to preserve admin enable/disable.
@@ -125,7 +141,7 @@ export async function refreshAllSourceCategoriesFromDB() {
   let total = 0;
   for (const s of sources) {
     try {
-      total += await refreshSourceCategoriesFromDB(s.id);
+      total += await refreshSourceCategoriesFromDB(s.id, { silent: true });
     } catch (e) {
       console.error("category refresh failed:", s.id, e.message);
     }
