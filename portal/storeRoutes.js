@@ -492,6 +492,70 @@ router.get("/:slug/subcategories", resolveStore, asyncH(async (req, res) => {
   res.json({ subcategories: [...byName].map(([name, mapped]) => ({ name, mapped })).sort((a, b) => a.name.localeCompare(b.name)) });
 }));
 
+// GET /store/:slug/menu — the full menu tree in one call:
+//   primary category → secondary categories (canonical, in-stock) → brands
+//     (canonical, in-stock). Vendor-curated featured brands are pinned first,
+//     then auto-derived brands fill the rest ("both ways").
+router.get("/:slug/menu", resolveStore, asyncH(async (req, res) => {
+  const enr = req.storeEnrollment;
+  const site = await loadSiteSettings(enr.id);
+  const allSources = await loadVendorSources(enr.id);
+  if (!allSources.length) return res.json({ menu: [] });
+  const showUnmapped = !(site.nav && site.nav.hide_unmapped);
+  const curated = Array.isArray(site.nav?.brands) ? site.nav.brands.filter((b) => b && b.brand) : [];
+  const navItems = (site.nav && Array.isArray(site.nav.items)) ? site.nav.items : [];
+  const labelOf = (db) => navItems.find((i) => i.category === db)?.label || (db.charAt(0).toUpperCase() + db.slice(1));
+
+  // primary categories in the vendor's order
+  let dbNames = [...new Set(allSources.map((s) => s.db_name))];
+  if (navItems.length) {
+    const rank = new Map(navItems.map((it, i) => [it.category, i]));
+    dbNames = dbNames.sort((a, b) => (rank.has(a) ? rank.get(a) : 999) - (rank.has(b) ? rank.get(b) : 999));
+  }
+
+  const menu = [];
+  for (const db of dbNames) {
+    const catSrc = allSources.filter((s) => s.db_name === db);
+    const p = [];
+    const scope = `(${sourceClauseSql(catSrc, p)}) AND ${AVAIL_TEXT} IN ('1','true') AND CAST(productOriginalPrice AS REAL) > 0`;
+    const rows = await runReadonly(
+      db,
+      `SELECT productFetchedFrom ff, catName, productBrand brand, COUNT(*) n FROM PRODUCTS
+        WHERE ${scope} AND catName IS NOT NULL AND TRIM(catName) != ''
+        GROUP BY productFetchedFrom, catName, productBrand`,
+      p
+    ).catch(() => []);
+
+    const bySub = new Map(); // canonical subcat -> Map(canonical brand -> count)
+    for (const r of rows) {
+      const src = catSrc.find((s) => String(r.ff || "").includes(s.search_key));
+      const canonCat = (src && src.catMap && src.catMap[r.catName]);
+      if (!canonCat && !showUnmapped) continue;
+      const subName = canonCat || r.catName;
+      if (!bySub.has(subName)) bySub.set(subName, new Map());
+      if (r.brand && String(r.brand).trim()) {
+        const brand = await canonicalBrand(r.brand);
+        const bm = bySub.get(subName);
+        bm.set(brand, (bm.get(brand) || 0) + Number(r.n));
+      }
+    }
+
+    const curatedForDb = curated.filter((b) => b.category === db).map((b) => String(b.brand).toLowerCase());
+    const subcategories = [...bySub].map(([name, bm]) => {
+      let brands = [...bm].map(([bn, count]) => ({ name: bn, count }));
+      brands.sort((a, b) => {
+        const ac = curatedForDb.includes(a.name.toLowerCase()) ? 0 : 1;
+        const bc = curatedForDb.includes(b.name.toLowerCase()) ? 0 : 1;
+        return ac !== bc ? ac - bc : b.count - a.count;
+      });
+      return { name, brands: brands.slice(0, 12).map((b) => b.name) };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+
+    menu.push({ category: db, label: labelOf(db), subcategories });
+  }
+  res.json({ menu });
+}));
+
 // GET /store/:slug/products/:dbName/:id — one product + similar items
 router.get("/:slug/products/:dbName/:id", resolveStore, asyncH(async (req, res) => {
   const enr = req.storeEnrollment;
