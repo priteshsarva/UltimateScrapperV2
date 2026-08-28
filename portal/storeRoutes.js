@@ -17,7 +17,7 @@ import {
 import { priceProduct, priceSqlExpr } from "./pricing.js";
 import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
-import { applyBrandToRows, rawBrandsFor, canonicalBrand, subBrandsFor, rawBrandsForSub, brandInfo } from "./brandMap.js";
+import { applyBrandToRows, rawBrandsFor, canonicalBrand, subBrandsFor, rawBrandsForSub, brandInfo, primaryBrandSet } from "./brandMap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FOLDER = path.resolve(__dirname, "../databases");
@@ -331,19 +331,23 @@ function buildListingWhere(req, catSources, pricing, brandRaws) {
 }
 
 // requested brand(s) → their raw scraped variants via the global brand map.
-// null = no brand filter. When sub_brand(s) are also given, narrow to the raws
-// matching that primary+secondary pair (the cascade: brand → sub-brand). Deduped.
+// null = no brand filter. sub_brand is a list of "Primary::Secondary" pairs, so
+// each brand narrows to ONLY its selected sub-brands while brands with no
+// sub-brand selected still match in full. Deduped, lowercased.
 async function expandBrands(req) {
-  const raw = [].concat(req.query.brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
-  if (!raw.length) return null;
-  const subs = [].concat(req.query.sub_brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
-  if (subs.length) {
-    const all = (await Promise.all(raw.flatMap((b) => subs.map((s) => rawBrandsForSub(b, s))))).flat();
-    if (all.length) return [...new Set(all.map((x) => x.toLowerCase()))];
-    // no raws matched the pair → fall through to the plain brand filter
+  const brands = [].concat(req.query.brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
+  if (!brands.length) return null;
+  const subsByBrand = new Map(); // primary -> [secondary, ...]
+  for (const pair of [].concat(req.query.sub_brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean))) {
+    const [b, s] = pair.split("::");
+    if (b && s) { if (!subsByBrand.has(b)) subsByBrand.set(b, []); subsByBrand.get(b).push(s); }
   }
-  const all = (await Promise.all(raw.map(rawBrandsFor))).flat();
-  return [...new Set(all.map((x) => x.toLowerCase()))];
+  const parts = await Promise.all(brands.map(async (b) => {
+    const subs = subsByBrand.get(b);
+    if (subs && subs.length) return (await Promise.all(subs.map((s) => rawBrandsForSub(b, s)))).flat();
+    return rawBrandsFor(b);
+  }));
+  return [...new Set(parts.flat().map((x) => x.toLowerCase()))];
 }
 
 const SORTS = {
@@ -475,33 +479,30 @@ router.get("/:slug/facets", resolveStore, asyncH(async (req, res) => {
     catParams
   ).catch(() => []);
 
-  // canonicalize brand names via the global brand map, merge duplicates, top 40
-  const merged = new Map();
+  // Fold raw spellings into their canonical PRIMARY brand and, under each, the
+  // SECONDARY (sub-)brands — one nested tree so the filter shows a brand with its
+  // own collapsible list of sub-brands. Alphabetical throughout.
+  const primMap = new Map(); // primary -> { count, subs: Map(secondary -> count) }
   for (const r of brandRows) {
-    const name = await canonicalBrand(r.brand);
-    merged.set(name, (merged.get(name) || 0) + Number(r.n));
+    const info = await brandInfo(r.brand);
+    const primary = (info && info.primary) || r.brand;
+    const secondary = info && info.secondary;
+    if (!primMap.has(primary)) primMap.set(primary, { count: 0, subs: new Map() });
+    const e = primMap.get(primary);
+    e.count += Number(r.n);
+    if (secondary) e.subs.set(secondary, (e.subs.get(secondary) || 0) + Number(r.n));
   }
-  const brands = [...merged].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 40);
-
-  // sub-brands for the selected primary brand(s), scoped + in-stock. Powers the
-  // cascade: pick a brand → its sub-brands appear as a further filter.
-  const brandSel = [].concat(req.query.brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
-  let subBrands = [];
-  if (brandSel.length) {
-    const raws = [...new Set((await Promise.all(brandSel.map(rawBrandsFor))).flat())];
-    if (raws.length) {
-      const sbRows = await runReadonly(
-        dbName,
-        `SELECT productBrand AS brand, COUNT(*) n FROM PRODUCTS
-          WHERE ${catScope} AND LOWER(productBrand) IN (${raws.map(() => "?").join(",")})
-          GROUP BY LOWER(productBrand)`,
-        [...catParams, ...raws.map((r) => r.toLowerCase())]
-      ).catch(() => []);
-      const sbMap = new Map();
-      for (const r of sbRows) { const info = await brandInfo(r.brand); if (info && info.secondary) sbMap.set(info.secondary, (sbMap.get(info.secondary) || 0) + Number(r.n)); }
-      subBrands = [...sbMap].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
-    }
-  }
+  // keep only clean canonical brands in the filter — unmapped raw/garbled
+  // spellings (SKU junk) are dropped from the facet (products still show them).
+  const primSet = await primaryBrandSet();
+  const brands = [...primMap]
+    .filter(([name]) => primSet.has(String(name).toLowerCase()))
+    .map(([name, e]) => ({
+      name, count: e.count,
+      subBrands: [...e.subs].map(([n, c]) => ({ name: n, count: c })).sort((a, b) => a.name.localeCompare(b.name)),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, 120);
 
   // sub-categories (canonical, via the vendor's category map) with in-stock counts
   // — on the FULL category (not narrowed) so the shopper can switch between them.
@@ -536,7 +537,6 @@ router.get("/:slug/facets", resolveStore, asyncH(async (req, res) => {
     price_min: Math.floor(bounds.lo || 0),
     price_max: Math.ceil(bounds.hi || 0),
     brands,
-    subBrands,
     subcategories,
     sizes,
   });

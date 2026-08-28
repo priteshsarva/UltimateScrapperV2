@@ -73,6 +73,13 @@ export async function brandInfo(raw) {
   return byRaw.get(String(raw).toLowerCase()) || null;
 }
 
+// the set of known PRIMARY brand names (lowercased) — used to keep the storefront
+// brand filter to clean canonical brands and drop unmapped raw/garbled spellings.
+export async function primaryBrandSet() {
+  const { byPrimary } = await load();
+  return new Set(byPrimary.keys());
+}
+
 // apply over a batch: set productBrand -> primary, and stamp subBrand -> secondary
 export async function applyBrandToRows(rows) {
   const { byRaw } = await load();

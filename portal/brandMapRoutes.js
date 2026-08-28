@@ -65,14 +65,13 @@ router.get("/brands", async (req, res) => {
     const p = [];
     if (q) { where.push("LOWER(productBrand) LIKE ?"); p.push(`%${q}%`); }
     const lists = await Promise.all(cats.map((c) =>
-      readAll(c, `SELECT productBrand AS brand, COUNT(*) n FROM PRODUCTS WHERE ${where.join(" AND ")} GROUP BY LOWER(productBrand) HAVING n >= 2 ORDER BY n DESC LIMIT 300`, p)
+      readAll(c, `SELECT productBrand AS brand, COUNT(*) n FROM PRODUCTS WHERE ${where.join(" AND ")} GROUP BY LOWER(productBrand) HAVING n >= 2 ORDER BY n DESC LIMIT 20000`, p)
     ));
     const merged = new Map();
     for (const rows of lists) for (const r of rows) merged.set(r.brand, (merged.get(r.brand) || 0) + Number(r.n));
-    // keep the 300 most-common (bound), then sort ALPHABETICALLY for the admin list
+    // ALL scraped brands (bounded high), sorted ALPHABETICALLY for the admin list
     const brands = [...merged].map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count).slice(0, 300)
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 12000);
     res.json({ brands });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
