@@ -5,7 +5,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { generateInvoiceForEnrollment } from "./billing.js";
 import { sendShopApprovedEmail } from "./mailer.js";
-import { billingTick } from "./scheduler.js";
+import { billingTick, hostedExpiryTick } from "./scheduler.js";
 
 const router = Router();
 router.use(requireAuth, requireAdmin);
@@ -46,6 +46,12 @@ router.post("/:id/approve", async (req, res) => {
 // manual trigger for the daily billing job (for testing, or an external system cron)
 router.post("/run-billing-tick", async (req, res) => {
   try { res.json(await billingTick()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// manual trigger for the hosted-storefront expiry lifecycle (grace reminders + auto-pause)
+router.post("/run-hosted-expiry-tick", async (req, res) => {
+  try { res.json(await hostedExpiryTick()); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 

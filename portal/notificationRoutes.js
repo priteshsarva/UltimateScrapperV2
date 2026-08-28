@@ -8,7 +8,7 @@ router.use(requireAuth);
 
 router.get("/notifications", async (req, res) => {
   try {
-    res.json({ notifications: await listNotifications(req.user.role) });
+    res.json({ notifications: await listNotifications(req.user.role, req.user.id) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
