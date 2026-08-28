@@ -17,7 +17,7 @@ import {
 import { priceProduct, priceSqlExpr } from "./pricing.js";
 import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
-import { applyBrandToRows, rawBrandsFor, canonicalBrand } from "./brandMap.js";
+import { applyBrandToRows, rawBrandsFor, canonicalBrand, subBrandsFor, rawBrandsForSub, brandInfo } from "./brandMap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FOLDER = path.resolve(__dirname, "../databases");
@@ -331,10 +331,17 @@ function buildListingWhere(req, catSources, pricing, brandRaws) {
 }
 
 // requested brand(s) → their raw scraped variants via the global brand map.
-// null = no brand filter. Deduped, lowercased.
+// null = no brand filter. When sub_brand(s) are also given, narrow to the raws
+// matching that primary+secondary pair (the cascade: brand → sub-brand). Deduped.
 async function expandBrands(req) {
   const raw = [].concat(req.query.brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
   if (!raw.length) return null;
+  const subs = [].concat(req.query.sub_brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
+  if (subs.length) {
+    const all = (await Promise.all(raw.flatMap((b) => subs.map((s) => rawBrandsForSub(b, s))))).flat();
+    if (all.length) return [...new Set(all.map((x) => x.toLowerCase()))];
+    // no raws matched the pair → fall through to the plain brand filter
+  }
   const all = (await Promise.all(raw.map(rawBrandsFor))).flat();
   return [...new Set(all.map((x) => x.toLowerCase()))];
 }
@@ -440,19 +447,32 @@ router.get("/:slug/facets", resolveStore, asyncH(async (req, res) => {
   const scope = `(${sourceClauseSql(catSources, scopeParams)}) AND ${AVAIL_TEXT} IN ('1','true') AND CAST(productOriginalPrice AS REAL) > 0`;
   const priceExpr = priceSqlExpr(site.pricing);
 
+  // Cascade: when a sub-category (?cat=) is picked, narrow the brand/size/price/
+  // sub-brand facets to it (sub-categories themselves stay on the full category
+  // so the shopper can switch). catScope adds the subcat clause to the base scope.
+  const subcat = (req.query.cat || "").toString().trim();
+  const catParams = [...scopeParams];
+  let catScope = scope;
+  if (subcat) {
+    const raws = new Set([subcat]);
+    for (const s of catSources) for (const [raw, canon] of Object.entries(s.catMap || {})) if (canon === subcat) raws.add(raw);
+    catScope = `${scope} AND catName IN (${[...raws].map(() => "?").join(",")})`;
+    catParams.push(...raws);
+  }
+
   const bounds = (await runReadonly(
     dbName,
-    `SELECT MIN(${priceExpr}) lo, MAX(${priceExpr}) hi FROM PRODUCTS WHERE ${scope}`,
-    scopeParams
+    `SELECT MIN(${priceExpr}) lo, MAX(${priceExpr}) hi FROM PRODUCTS WHERE ${catScope}`,
+    catParams
   ).catch(() => [{}]))[0] || {};
 
   const brandRows = await runReadonly(
     dbName,
     `SELECT productBrand AS brand, COUNT(*) n FROM PRODUCTS
-      WHERE ${scope} AND productBrand IS NOT NULL AND TRIM(productBrand) != ''
+      WHERE ${catScope} AND productBrand IS NOT NULL AND TRIM(productBrand) != ''
       GROUP BY LOWER(productBrand)
       HAVING n >= 2 AND LENGTH(productBrand) <= 60`,
-    scopeParams
+    catParams
   ).catch(() => []);
 
   // canonicalize brand names via the global brand map, merge duplicates, top 40
@@ -463,7 +483,28 @@ router.get("/:slug/facets", resolveStore, asyncH(async (req, res) => {
   }
   const brands = [...merged].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 40);
 
+  // sub-brands for the selected primary brand(s), scoped + in-stock. Powers the
+  // cascade: pick a brand → its sub-brands appear as a further filter.
+  const brandSel = [].concat(req.query.brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
+  let subBrands = [];
+  if (brandSel.length) {
+    const raws = [...new Set((await Promise.all(brandSel.map(rawBrandsFor))).flat())];
+    if (raws.length) {
+      const sbRows = await runReadonly(
+        dbName,
+        `SELECT productBrand AS brand, COUNT(*) n FROM PRODUCTS
+          WHERE ${catScope} AND LOWER(productBrand) IN (${raws.map(() => "?").join(",")})
+          GROUP BY LOWER(productBrand)`,
+        [...catParams, ...raws.map((r) => r.toLowerCase())]
+      ).catch(() => []);
+      const sbMap = new Map();
+      for (const r of sbRows) { const info = await brandInfo(r.brand); if (info && info.secondary) sbMap.set(info.secondary, (sbMap.get(info.secondary) || 0) + Number(r.n)); }
+      subBrands = [...sbMap].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+    }
+  }
+
   // sub-categories (canonical, via the vendor's category map) with in-stock counts
+  // — on the FULL category (not narrowed) so the shopper can switch between them.
   const subRows = await runReadonly(
     dbName,
     `SELECT productFetchedFrom ff, catName, COUNT(*) n FROM PRODUCTS
@@ -484,8 +525,8 @@ router.get("/:slug/facets", resolveStore, asyncH(async (req, res) => {
   // a sample catches them all without reading every row in an 80k-product DB.
   const sizeRows = await runReadonly(
     dbName,
-    `SELECT sizeName FROM PRODUCTS WHERE ${scope} AND sizeName IS NOT NULL AND sizeName != '' AND sizeName != '[]' LIMIT 5000`,
-    scopeParams
+    `SELECT sizeName FROM PRODUCTS WHERE ${catScope} AND sizeName IS NOT NULL AND sizeName != '' AND sizeName != '[]' LIMIT 5000`,
+    catParams
   ).catch(() => []);
   const sizeSet = new Set();
   for (const r of sizeRows) { try { for (const s of JSON.parse(r.sizeName) || []) if (s != null && String(s).trim()) sizeSet.add(String(s).trim()); } catch { /* skip */ } }
@@ -495,6 +536,7 @@ router.get("/:slug/facets", resolveStore, asyncH(async (req, res) => {
     price_min: Math.floor(bounds.lo || 0),
     price_max: Math.ceil(bounds.hi || 0),
     brands,
+    subBrands,
     subcategories,
     sizes,
   });

@@ -6,6 +6,7 @@ import { requireAuth, requireAdmin } from "./auth.js";
 import { generateInvoiceForEnrollment } from "./billing.js";
 import { sendShopApprovedEmail } from "./mailer.js";
 import { billingTick, hostedExpiryTick } from "./scheduler.js";
+import { runCatalogueScan } from "./catalogueScan.js";
 
 const router = Router();
 router.use(requireAuth, requireAdmin);
@@ -52,6 +53,12 @@ router.post("/run-billing-tick", async (req, res) => {
 // manual trigger for the hosted-storefront expiry lifecycle (grace reminders + auto-pause)
 router.post("/run-hosted-expiry-tick", async (req, res) => {
   try { res.json(await hostedExpiryTick()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// manual trigger for the catalogue scan (categories + brands from product DBs)
+router.post("/run-catalogue-scan", async (req, res) => {
+  try { res.json(await runCatalogueScan()); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 

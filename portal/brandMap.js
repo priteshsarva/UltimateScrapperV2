@@ -42,6 +42,37 @@ export async function rawBrandsFor(primary) {
   return [...out];
 }
 
+// the sub-brands (secondary values) defined for a PRIMARY brand
+export async function subBrandsFor(primary) {
+  const { byRaw } = await load();
+  const p = String(primary || "").toLowerCase();
+  const out = new Set();
+  for (const m of byRaw.values()) {
+    if (m.secondary && String(m.primary).toLowerCase() === p) out.add(m.secondary);
+  }
+  return [...out];
+}
+
+// raw brands that map to a specific PRIMARY + SECONDARY pair (for a sub-brand
+// filter). No fallback to the literal value — a sub-brand only exists via the map.
+export async function rawBrandsForSub(primary, secondary) {
+  const { byRaw } = await load();
+  const p = String(primary || "").toLowerCase();
+  const s = String(secondary || "").toLowerCase();
+  const out = [];
+  for (const [raw, m] of byRaw) {
+    if (m.secondary && String(m.primary).toLowerCase() === p && String(m.secondary).toLowerCase() === s) out.push(raw);
+  }
+  return out;
+}
+
+// mapping info for a raw brand: { primary, secondary } or null
+export async function brandInfo(raw) {
+  if (!raw) return null;
+  const { byRaw } = await load();
+  return byRaw.get(String(raw).toLowerCase()) || null;
+}
+
 // apply over a batch: set productBrand -> primary, and stamp subBrand -> secondary
 export async function applyBrandToRows(rows) {
   const { byRaw } = await load();

@@ -7,6 +7,7 @@ import { query } from "./db.js";
 import { generateInvoiceForEnrollment } from "./billing.js";
 import { sendReminderEmail, sendMail } from "./mailer.js";
 import { notify } from "./notifications.js";
+import { runCatalogueScan } from "./catalogueScan.js";
 
 // Hosted storefronts get a 5-day grace after their plan expires: the store stays
 // live, but the owner is emailed (up to 3×/day) and gets an in-portal notification.
@@ -113,6 +114,13 @@ export async function billingTick() {
 // If not installed, call billingTick() from an external cron hitting
 // POST /portal/admin/shops/run-billing-tick instead.
 export function startScheduler() {
+  // On every server start: refresh categories + brands from the product DBs, and
+  // notify the admin about any new brands that still need a mapping. Deferred a
+  // few seconds so it doesn't compete with startup.
+  setTimeout(() => {
+    runCatalogueScan().then((r) => console.log("[scan] startup", r)).catch((e) => console.error("[scan] startup:", e.message));
+  }, 4000);
+
   import("node-cron")
     .then((cron) => {
       cron.default.schedule("0 8 * * *", () => {
@@ -122,7 +130,11 @@ export function startScheduler() {
       cron.default.schedule("0 8,14,20 * * *", () => {
         hostedExpiryTick().then((r) => console.log("[hosted] expiry tick", r)).catch((e) => console.error("[hosted] expiry tick:", e.message));
       });
-      console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20");
+      // daily catalogue scan: categories + brands from the product DBs
+      cron.default.schedule("30 7 * * *", () => {
+        runCatalogueScan().then((r) => console.log("[scan] daily", r)).catch((e) => console.error("[scan] daily:", e.message));
+      });
+      console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30");
     })
     .catch(() => console.warn("[billing] node-cron not installed — trigger billingTick via the admin endpoint or system cron"));
 }
