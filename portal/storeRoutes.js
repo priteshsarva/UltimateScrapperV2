@@ -319,6 +319,14 @@ function buildListingWhere(req, catSources, pricing, brandRaws) {
     params.push(...raws);
   }
 
+  // size filter (?size=40,41): sizeName is a JSON array string like '["40","41"]'
+  // — match any selected size as a substring of that array.
+  const sizes = [].concat(req.query.size || []).flatMap((s) => String(s).split(",").map((x) => x.trim()).filter(Boolean));
+  if (sizes.length) {
+    where.push(`(${sizes.map(() => `sizeName LIKE ?`).join(" OR ")})`);
+    params.push(...sizes.map((s) => `%"${s}"%`));
+  }
+
   return { where: where.join(" AND "), params, priceExpr };
 }
 
@@ -455,10 +463,40 @@ router.get("/:slug/facets", resolveStore, asyncH(async (req, res) => {
   }
   const brands = [...merged].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 40);
 
+  // sub-categories (canonical, via the vendor's category map) with in-stock counts
+  const subRows = await runReadonly(
+    dbName,
+    `SELECT productFetchedFrom ff, catName, COUNT(*) n FROM PRODUCTS
+      WHERE ${scope} AND catName IS NOT NULL AND TRIM(catName) != ''
+      GROUP BY productFetchedFrom, catName`,
+    scopeParams
+  ).catch(() => []);
+  const subMap = new Map();
+  for (const r of subRows) {
+    const src = catSources.find((s) => String(r.ff || "").includes(s.search_key));
+    const canon = (src && src.catMap && src.catMap[r.catName]) || r.catName;
+    subMap.set(canon, (subMap.get(canon) || 0) + Number(r.n));
+  }
+  const subcategories = [...subMap].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+
+  // sizes: distinct values pulled from the JSON-array sizeName. ponytail: sampled
+  // to 5000 rows to bound the scan — the size vocabulary is tiny (e.g. 36–47), so
+  // a sample catches them all without reading every row in an 80k-product DB.
+  const sizeRows = await runReadonly(
+    dbName,
+    `SELECT sizeName FROM PRODUCTS WHERE ${scope} AND sizeName IS NOT NULL AND sizeName != '' AND sizeName != '[]' LIMIT 5000`,
+    scopeParams
+  ).catch(() => []);
+  const sizeSet = new Set();
+  for (const r of sizeRows) { try { for (const s of JSON.parse(r.sizeName) || []) if (s != null && String(s).trim()) sizeSet.add(String(s).trim()); } catch { /* skip */ } }
+  const sizes = [...sizeSet].sort((a, b) => (parseFloat(a) - parseFloat(b)) || String(a).localeCompare(String(b))).slice(0, 60);
+
   res.json({
     price_min: Math.floor(bounds.lo || 0),
     price_max: Math.ceil(bounds.hi || 0),
     brands,
+    subcategories,
+    sizes,
   });
 }));
 
