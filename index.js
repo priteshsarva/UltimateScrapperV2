@@ -59,6 +59,7 @@ import { sppSyncLogger } from './spp-sync-logger.js';
 import storeRoutes from "./portal/storeRoutes.js";
 import catalogueRoutes from "./portal/catalogueRoutes.js";
 import notificationRoutes from "./portal/notificationRoutes.js";
+import brandMapRoutes from "./portal/brandMapRoutes.js";
 import { clientRouter as hostedSiteRoutes, adminRouter as adminHostedSiteRoutes } from "./portal/hostedSiteRoutes.js";
 
 
@@ -203,6 +204,7 @@ app.use("/portal", clientShopRoutes);
 app.use("/portal", categoryMapRoutes)
 app.use("/portal/admin/settings", adminSettingsRoutes);  // SMTP + payment config
 app.use("/portal/admin", adminUsersRoutes);              // GET /portal/admin/users
+app.use("/portal/admin", brandMapRoutes);                // brand-map + /brands (global brand mapping)
 app.use("/portal/admin/db", dbMaintenanceRoutes);        // health / repair (admin)
 app.use("/portal", archiveRoutes);                       // archive-stale (NO auth, ?confirm=yes)
 app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-info (non-secret)

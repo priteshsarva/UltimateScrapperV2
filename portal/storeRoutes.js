@@ -17,6 +17,7 @@ import {
 import { priceProduct, priceSqlExpr } from "./pricing.js";
 import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
+import { applyBrandToRows, rawBrandsFor, canonicalBrand } from "./brandMap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FOLDER = path.resolve(__dirname, "../databases");
@@ -278,12 +279,14 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
 // source allow-list + stock + text + brand + displayed-price range. Returns
 // { where, params, priceExpr } — priceExpr is the marked-up-price SQL used by
 // the price filter and the price sort.
-function buildListingWhere(req, catSources, pricing) {
+function buildListingWhere(req, catSources, pricing, brandRaws) {
   const q = (req.query.q || "").toString().trim().toLowerCase();
   const stock = req.query.stock === "in" ? "in" : req.query.stock === "out" ? "out" : "in"; // hide OOS by default
-  const brands = []
-    .concat(req.query.brand || [])
-    .flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
+  // brandRaws (precomputed): the requested brands expanded to their raw variants
+  // via the global brand map, so filtering by a canonical brand catches every
+  // scraped spelling. Falls back to the literal query values.
+  const brands = Array.isArray(brandRaws) ? brandRaws
+    : [].concat(req.query.brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
   const priceMin = parseFloat(req.query.price_min);
   const priceMax = parseFloat(req.query.price_max);
 
@@ -318,6 +321,15 @@ function buildListingWhere(req, catSources, pricing) {
   return { where: where.join(" AND "), params, priceExpr };
 }
 
+// requested brand(s) → their raw scraped variants via the global brand map.
+// null = no brand filter. Deduped, lowercased.
+async function expandBrands(req) {
+  const raw = [].concat(req.query.brand || []).flatMap((b) => String(b).split(",").map((x) => x.trim()).filter(Boolean));
+  if (!raw.length) return null;
+  const all = (await Promise.all(raw.map(rawBrandsFor))).flat();
+  return [...new Set(all.map((x) => x.toLowerCase()))];
+}
+
 const SORTS = {
   featured: "productId ASC",
   newest: "productDateCreation DESC, productId DESC",
@@ -338,6 +350,7 @@ router.get("/:slug/products", resolveStore, asyncH(async (req, res) => {
 
   const site = await loadSiteSettings(enr.id);
   const category = (req.query.category || "").toString();
+  const brandRaws = await expandBrands(req); // global brand map: canonical → raw variants
 
   // "all" = mix products from EVERY category the store sells (each category is
   // its own SQLite file). Query each, map to display rows, then interleave
@@ -347,9 +360,10 @@ router.get("/:slug/products", resolveStore, asyncH(async (req, res) => {
     const need = offset + limit + 1; // enough to fill this page + know if there's more
     const lists = await Promise.all(dbNames.map(async (db) => {
       const catSrc = allSources.filter((s) => s.db_name === db);
-      const { where, params, priceExpr } = buildListingWhere(req, catSrc, site.pricing);
+      const { where, params, priceExpr } = buildListingWhere(req, catSrc, site.pricing, brandRaws);
       const order = (SORTS[req.query.sort] || SORTS.featured).replace("__PRICE__", priceExpr);
       const rows = await runReadonly(db, `SELECT * FROM PRODUCTS WHERE ${where} ORDER BY ${order} LIMIT ?`, [...params, need]).catch(() => []);
+      await applyBrandToRows(rows);
       return rows.map((r) => priceRow(applyCatMap(r, catSrc), db, site.pricing));
     }));
     let merged;
@@ -370,7 +384,7 @@ router.get("/:slug/products", resolveStore, asyncH(async (req, res) => {
   const catSources = allSources.filter((s) => s.db_name === dbName);
   if (!catSources.length) return res.json({ page, count: 0, hasMore: false, results: [] });
 
-  const { where, params, priceExpr } = buildListingWhere(req, catSources, site.pricing);
+  const { where, params, priceExpr } = buildListingWhere(req, catSources, site.pricing, brandRaws);
   const order = (SORTS[req.query.sort] || SORTS.featured).replace("__PRICE__", priceExpr);
 
   // fetch one extra row to know whether there's a next page without a COUNT(*)
@@ -378,6 +392,7 @@ router.get("/:slug/products", resolveStore, asyncH(async (req, res) => {
   const rows = await runReadonly(dbName, sql, [...params, limit + 1, offset]).catch(() => []);
   const hasMore = rows.length > limit;
   const pageRows = rows.slice(0, limit);
+  await applyBrandToRows(pageRows); // global brand map → canonical display brand
   res.json({ page, count: pageRows.length, hasMore, results: pageRows.map((r) => priceRow(applyCatMap(r, catSources), dbName, site.pricing)) });
 }));
 
@@ -427,15 +442,22 @@ router.get("/:slug/facets", resolveStore, asyncH(async (req, res) => {
     `SELECT productBrand AS brand, COUNT(*) n FROM PRODUCTS
       WHERE ${scope} AND productBrand IS NOT NULL AND TRIM(productBrand) != ''
       GROUP BY LOWER(productBrand)
-      HAVING n >= 2 AND LENGTH(productBrand) <= 40
-      ORDER BY n DESC LIMIT 40`,
+      HAVING n >= 2 AND LENGTH(productBrand) <= 60`,
     scopeParams
   ).catch(() => []);
+
+  // canonicalize brand names via the global brand map, merge duplicates, top 40
+  const merged = new Map();
+  for (const r of brandRows) {
+    const name = await canonicalBrand(r.brand);
+    merged.set(name, (merged.get(name) || 0) + Number(r.n));
+  }
+  const brands = [...merged].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 40);
 
   res.json({
     price_min: Math.floor(bounds.lo || 0),
     price_max: Math.ceil(bounds.hi || 0),
-    brands: brandRows.map((r) => ({ name: r.brand, count: r.n })),
+    brands,
   });
 }));
 
@@ -769,8 +791,14 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
     if (email) sendOrderConfirmationEmail({ ...emailPayload, buyerName: name, buyerEmail: email, whatsappUrl: wa_url }).catch(() => {});
     (async () => {
       try {
-        const vendor = (await query(`select u.email from users u join enrollments e on e.user_id=u.id where e.id=$1`, [enr.id])).rows[0];
-        if (vendor?.email) sendOrderNotificationEmail({ ...emailPayload, vendorEmail: vendor.email, buyerName: name, buyerPhone: phone });
+        // Order notification goes to the STOREFRONT's own email (site.email) when
+        // set; otherwise fall back to the client/vendor account email.
+        let notifyTo = site.email && String(site.email).trim();
+        if (!notifyTo) {
+          const vendor = (await query(`select u.email from users u join enrollments e on e.user_id=u.id where e.id=$1`, [enr.id])).rows[0];
+          notifyTo = vendor?.email;
+        }
+        if (notifyTo) sendOrderNotificationEmail({ ...emailPayload, vendorEmail: notifyTo, buyerName: name, buyerPhone: phone });
       } catch (e) { console.error("[order-email vendor] lookup failed:", e.message); }
     })();
 
