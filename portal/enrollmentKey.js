@@ -32,6 +32,15 @@ export async function requireEnrollmentKey(req, res, next) {
       }
       return res.status(403).json({ error: "Enrollment expired" });
     }
+    // self-heal a stale 'expired' flag: we only reach here when expiry_date is in
+    // the FUTURE (the block above returns on real expiry), and every writer that
+    // advances expiry_date also sets status='active' — so a future expiry always
+    // means paid. The overdue-invoice sweep can flip status without touching the
+    // date; expiry_date is the source of truth, so clear the stale flag.
+    if (enr.status === "expired" && enr.expiry_date) {
+      await query(`update enrollments set status='active' where id=$1`, [enr.id]);
+      enr.status = "active";
+    }
     if (enr.status !== "active") {
       return res.status(403).json({ error: `Enrollment ${enr.status}` });
     }

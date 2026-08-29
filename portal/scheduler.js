@@ -100,6 +100,7 @@ export async function billingTick() {
   const expired = await query(
     `update enrollments set status='expired'
       where status in ('approved','active')
+        and (expiry_date is null or expiry_date < now())
         and id in (
           select enrollment_id from invoices
            where status in ('created','pending') and due_date < now() and enrollment_id is not null
