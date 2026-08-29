@@ -1,28 +1,43 @@
-// Resolve :slug -> the hosted enrollment it belongs to. Mount at the top of
-// every /store/:slug/* route. Only an ACTIVE hosted enrollment is a live store —
-// pending/rejected/expired all read as "not found" to a browsing shopper.
+// Resolve a request to the hosted enrollment that should serve it. Mounted at
+// the top of every /store/:slug/* route. Only an ACTIVE hosted enrollment is a
+// live store — pending/rejected/expired/paused all read as "not found".
 //
-// Custom domains: when the client sends `X-Store-Host: aquawatch.com` (which
-// the storefront SPA does on every /store/* call), we try that against
-// enrollments.custom_domain FIRST — only if no verified custom domain matches
-// do we fall back to the URL segment slug. That way one deployed SPA can serve
-// slug.platform.com AND aquawatch.com from the same code, no reconfig.
+// Resolution order, and WHY it's ordered this way (security):
+//   1. A VERIFIED custom domain match wins. Only verified, so a vendor can't
+//      claim someone else's domain and serve their own store through it.
+//   2. Otherwise, only fall back to the URL-path slug when the request actually
+//      arrived on the PLATFORM's own host (a <slug>.PLATFORM_HOST subdomain) or
+//      in local dev (localhost / an IP, where the slug comes from ?store=).
+//      A request arriving on some OTHER hostname (an unverified custom domain,
+//      or an attacker pointing any domain at us) must NOT be served a slug it
+//      names in the path — that was the hole that let an unverified domain
+//      serve an unrelated vendor.
 import { query } from "./db.js";
+
+const PLATFORM_HOST = (process.env.PLATFORM_HOST || "").toLowerCase().replace(/^\.+|\.+$/g, "");
 
 function normalizeHost(h) {
   if (!h) return "";
-  return String(h).trim().toLowerCase().split(":")[0].replace(/^www\./, "");
+  return String(h).trim().toLowerCase().split(",")[0].split(":")[0].replace(/\.+$/, "").replace(/^www\./, "");
 }
+
+const isLocalHost = (h) => h === "localhost" || h === "127.0.0.1" || /^\d+\.\d+\.\d+\.\d+$/.test(h);
+const isPlatformHost = (h) => !!PLATFORM_HOST && (h === PLATFORM_HOST || h.endsWith("." + PLATFORM_HOST));
 
 export async function resolveStore(req, res, next) {
   const slug = String(req.params.slug || "").toLowerCase();
-  const host = normalizeHost(req.headers["x-store-host"]);
 
-  // custom-domain match wins when the client is really at the vendor's own
-  // domain. Only verified custom domains resolve — unverified means the vendor
-  // hasn't proved DNS yet; we don't want to accidentally serve someone else's slug.
+  // The host the request really arrived on. Behind Cloudflare/a proxy that's
+  // x-forwarded-host; X-Store-Host is the storefront SPA's dev convenience and
+  // is only trusted when the real host is local (can't spoof tenancy in prod).
+  const realHost = normalizeHost(req.headers["x-forwarded-host"] || req.headers.host);
+  const devHost = normalizeHost(req.headers["x-store-host"]);
+  const host = (isLocalHost(realHost) && devHost) ? devHost : realHost;
+
   let enr = null;
-  if (host) {
+
+  // 1) verified custom domain
+  if (host && !isLocalHost(host) && !isPlatformHost(host)) {
     const { rows } = await query(
       `select id, user_id, slug, status, expiry_date
          from enrollments
@@ -31,9 +46,12 @@ export async function resolveStore(req, res, next) {
       [host]
     );
     enr = rows[0] || null;
+    // a non-platform host that is NOT a verified custom domain gets nothing —
+    // do NOT fall through to the path slug (that's the hijack vector).
+    if (!enr) return res.status(404).json({ error: "Store not found" });
   }
 
-  // fall back to the URL-segment slug (subdomains, local dev ?store=)
+  // 2) platform subdomain or local dev → resolve by the path slug
   if (!enr) {
     const { rows } = await query(
       `select id, user_id, slug, status, expiry_date

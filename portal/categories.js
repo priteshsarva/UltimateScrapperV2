@@ -17,6 +17,7 @@ import { query, pool } from "./db.js";
 import { getSource, listSources } from "./sources.js";
 import { scrapeCategoriesA, scrapeCategoriesB } from "./scrapeCategories.js";
 import { reconcileCategories } from "./reconcileCategories.js";
+import { notify } from "./notifications.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // databases/ sits at the server root (sibling of portal/). Adjust if yours differs.
@@ -36,12 +37,15 @@ const closeAsync = (db) => new Promise((res) => db.close(() => res()));
 
 // Clean per-source categories from PRODUCTS.
 // Scoped by productFetchedFrom; excludes empty + corrupted comma-joined catNames.
+const AVAIL_IN = `LOWER(CAST(COALESCE(availability,'0') AS TEXT)) IN ('1','true')`;
+
 async function readCategoriesFromDB(source) {
   const db = await openReadonly(source.category);
   try {
     const rows = await allAsync(
       db,
-      `SELECT catName AS name, COUNT(*) AS c
+      `SELECT catName AS name, COUNT(*) AS c,
+              SUM(CASE WHEN ${AVAIL_IN} THEN 1 ELSE 0 END) AS instock
          FROM PRODUCTS
         WHERE productFetchedFrom LIKE '%' || ? || '%'
           AND catName IS NOT NULL
@@ -50,10 +54,10 @@ async function readCategoriesFromDB(source) {
         GROUP BY catName`,
       [source.search_key]
     );
-    // name + count only. slug/img are NOT taken from the CATEGORIES table because
-    // that table is globally deduped (it would borrow another source's slug/img).
-    // Accurate slug/img come from the live category-page scrape instead.
-    return rows.map((r) => ({ name: r.name, count: r.c }));
+    // name + total + in-stock count. slug/img come from the live category-page
+    // scrape (the CATEGORIES table is globally deduped and would borrow another
+    // source's slug/img).
+    return rows.map((r) => ({ name: r.name, count: r.c, inStock: r.instock || 0 }));
   } finally {
     await closeAsync(db);
   }
@@ -85,25 +89,58 @@ async function readCategoryCounts(source) {
 async function upsertCategories(sourceId, cats, { withCount = true } = {}) {
   for (const c of cats) {
     await query(
-      `insert into source_categories (source_id, cat_name, slug, img, product_count)
-       values ($1,$2,$3,$4,$5)
+      `insert into source_categories (source_id, cat_name, slug, img, product_count, in_stock_count)
+       values ($1,$2,$3,$4,$5,$7)
        on conflict (source_id, cat_name) do update set
-         product_count = case when $6 then excluded.product_count else source_categories.product_count end,
-         slug          = coalesce(excluded.slug, source_categories.slug),
-         img           = coalesce(excluded.img, source_categories.img),
-         updated_at    = now()`,
-      [sourceId, c.name, c.slug || null, c.img || null, c.count || 0, withCount]
+         product_count  = case when $6 then excluded.product_count else source_categories.product_count end,
+         in_stock_count = case when $6 then excluded.in_stock_count else source_categories.in_stock_count end,
+         slug           = coalesce(excluded.slug, source_categories.slug),
+         img            = coalesce(excluded.img, source_categories.img),
+         updated_at     = now()`,
+      [sourceId, c.name, c.slug || null, c.img || null, c.count || 0, withCount, c.inStock || 0]
     );
   }
 }
 
 // Existing source: instant, from products already in SQLite.
 // Refreshes counts. Does NOT deprecate — see the note at the top of this file.
-export async function refreshSourceCategoriesFromDB(sourceId) {
+export async function refreshSourceCategoriesFromDB(sourceId, { silent = false } = {}) {
   const source = await getSource(sourceId);
   if (!source) throw new Error("Source not found");
+  const existing = new Set((await query(`select cat_name from source_categories where source_id=$1`, [sourceId])).rows.map((r) => r.cat_name));
   const cats = await readCategoriesFromDB(source);
   await upsertCategories(sourceId, cats, { withCount: true });
+
+  // Notify clients + admin about genuinely NEW categories on this source (they're
+  // auto-added above). Skipped in bulk/silent runs to avoid a notification storm.
+  if (!silent) {
+    for (const c of cats.filter((c) => !existing.has(c.name))) {
+      await notify({
+        type: "new_category",
+        audience: "all_clients",
+        title: `New category on ${source.name}`,
+        body: `"${c.name}" — ${c.count} product${c.count === 1 ? "" : "s"} (added automatically).`,
+        meta: { source_id: sourceId, source_name: source.name, cat_name: c.name, count: c.count },
+      }).catch(() => {});
+    }
+  }
+  // Correct stale rows: any stored category with NO products in the DB any more
+  // gets zeroed (total + in-stock), so it surfaces as "no products" instead of a
+  // wrong old count. We zero rather than delete to preserve admin enable/disable.
+  const names = cats.map((c) => c.name);
+  await query(
+    `update source_categories set product_count = 0, in_stock_count = 0, updated_at = now()
+      where source_id = $1 and (cardinality($2::text[]) = 0 or cat_name <> all($2))`,
+    [sourceId, names]
+  );
+
+  // Auto-enable/disable by stock: a category with NO in-stock products is
+  // disabled (drops out of the vendor picker + storefront); it re-enables when
+  // it has stock again. This is a stock-driven catalogue, so enabled tracks stock.
+  await query(
+    `update source_categories set enabled = (in_stock_count > 0), updated_at = now() where source_id = $1`,
+    [sourceId]
+  );
   return cats.length;
 }
 
@@ -112,7 +149,7 @@ export async function refreshAllSourceCategoriesFromDB() {
   let total = 0;
   for (const s of sources) {
     try {
-      total += await refreshSourceCategoriesFromDB(s.id);
+      total += await refreshSourceCategoriesFromDB(s.id, { silent: true });
     } catch (e) {
       console.error("category refresh failed:", s.id, e.message);
     }
@@ -174,14 +211,15 @@ export async function listSourceCategories(sourceId, { enabledOnly = false, incl
   if (enabledOnly) conds.push("enabled=true");
   if (!includeDeprecated) conds.push("status='active'");
   const { rows } = await query(
-    `select cat_name, slug, handle, img, product_count, enabled, status,
+    `select cat_name, slug, handle, img, product_count, in_stock_count, enabled, status,
             previous_name, last_seen_at, deprecated_at
        from source_categories
       where ${conds.join(" and ")}
       order by (status='deprecated'), product_count desc, cat_name asc`,
     [sourceId]
   );
-  return rows;
+  // no_stock: has products on record but none in stock right now → "no products"
+  return rows.map((r) => ({ ...r, no_stock: (r.product_count || 0) === 0 || (r.in_stock_count || 0) === 0 }));
 }
 
 export async function setCategoryEnabled(sourceId, catName, enabled) {

@@ -104,7 +104,7 @@ function itemsTable(items) {
   return `<table style="width:100%;border-collapse:collapse;margin:16px 0">
     <tr><th style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;font-size:12px;color:#8a94a6">ITEM</th><th style="text-align:right;padding:8px 0;border-bottom:1px solid #eee;font-size:12px;color:#8a94a6">TOTAL</th></tr>
     ${items.map(it => `<tr>
-      <td style="padding:8px 0;border-bottom:1px solid #f4f5f7">${it.product_name} × ${it.qty}</td>
+      <td style="padding:8px 0;border-bottom:1px solid #f4f5f7">${it.product_name}${it.size ? ` <span style="color:#6b7688">(Size ${it.size})</span>` : ""} × ${it.qty}</td>
       <td style="padding:8px 0;border-bottom:1px solid #f4f5f7;text-align:right">₹${Number(it.line_total).toLocaleString("en-IN")}</td>
     </tr>`).join("")}
   </table>`;

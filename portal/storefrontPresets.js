@@ -7,23 +7,24 @@
 const COMMERCE = [
   { type: "banner", props: { height: "md", overlay: 35, text_color: "light" } },
   { type: "categories", title: "Shop by Category", wrap: { padding: "lg" } },
+  { type: "brands", title: "Shop by Brand", wrap: { padding: "lg" } },
   { type: "products", title: "Best Sellers", wrap: { padding: "md" }, props: { style: "rail", limit: 8 } },
+  // Claim-free labels only. A preset must never publish a delivery/returns
+  // PROMISE on a vendor's behalf — the vendor's real terms live in their
+  // policies, and a shopper can hold them to whatever this says.
   { type: "features", wrap: { padding: "md", bg_color: "#F7F8FB" }, props: {
     items: [
-      { icon: "Truck", title: "Fast Shipping", text: "Delivered across India in 3–5 days" },
-      { icon: "ShieldCheck", title: "Secure Checkout", text: "Every order handled personally on WhatsApp" },
-      { icon: "RotateCcw", title: "Easy Returns", text: "7-day return window, no questions asked" },
-      { icon: "Headphones", title: "Real Support", text: "Talk to a human, not a bot" },
+      { icon: "Truck", title: "Shipping" },
+      { icon: "ShieldCheck", title: "Secure Checkout" },
+      { icon: "RotateCcw", title: "Returns" },
+      { icon: "Headphones", title: "Support" },
     ],
     columns: 4,
   } },
-  { type: "testimonials", title: "Loved by our customers", wrap: { padding: "lg" }, props: {
-    items: [
-      { quote: "Genuinely felt like a boutique experience. Quick replies, quick delivery.", author: "Priya S.", role: "Bengaluru", stars: 5 },
-      { quote: "The order came exactly as shown. Packaging was thoughtful too.", author: "Rahul M.", role: "Mumbai", stars: 5 },
-      { quote: "Best price I found anywhere, and the WhatsApp support made checkout easy.", author: "Anita K.", role: "Delhi", stars: 5 },
-    ],
-  } },
+  // Empty on purpose: Testimonials self-hides until the vendor adds REAL ones.
+  // Shipping invented five-star reviews under a vendor's brand is a
+  // consumer-protection problem for them and for the platform.
+  { type: "testimonials", title: "What our customers say", wrap: { padding: "lg" }, props: { items: [] } },
   { type: "cta", wrap: { padding: "md" }, props: {
     title: "Not sure what to pick?",
     subtitle: "Chat with us on WhatsApp — we'll help you find the right piece.",
@@ -33,10 +34,9 @@ const COMMERCE = [
 
 const SHOWCASE = [
   { type: "banner", props: { height: "lg", overlay: 40, text_color: "light" } },
-  { type: "text", wrap: { padding: "lg" }, props: {
-    text: "A curated selection of pieces we personally love — no filler, no clutter.",
-    align: "center",
-  } },
+  // no first-person copy here either — the vendor's own "About" text fills this
+  // in from site_settings; an empty text block self-hides.
+  { type: "text", wrap: { padding: "lg" }, props: { text: "", align: "center" } },
   { type: "products", title: "This Month's Picks", wrap: { padding: "md" }, props: { style: "grid", limit: 8 } },
   { type: "banner_grid", wrap: { padding: "md" }, props: {
     tiles: [
@@ -46,9 +46,9 @@ const SHOWCASE = [
   } },
   { type: "features", wrap: { padding: "md", bg_color: "#F7F8FB" }, props: {
     items: [
-      { icon: "Truck", title: "Free shipping", text: "On orders above ₹2000" },
-      { icon: "Headphones", title: "WhatsApp support", text: "Real people, quick replies" },
-      { icon: "RotateCcw", title: "Easy returns", text: "7 days, no questions" },
+      { icon: "Truck", title: "Shipping" },
+      { icon: "Headphones", title: "WhatsApp Support" },
+      { icon: "RotateCcw", title: "Returns" },
     ],
     columns: 3,
   } },

@@ -53,10 +53,12 @@ create table if not exists enrollments (
   id              uuid primary key default gen_random_uuid(),
   user_id         uuid not null references users(id) on delete cascade,
   domain          text not null,                    -- the client's WordPress site
-  source_id       text not null references sources(id),
+  -- nullable: multi-source stores keep their sources in enrollment_sources, and
+  -- hosted storefronts (type='hosted') have no single primary source at all.
+  source_id       text references sources(id),
   enrollment_key  text unique not null,             -- the spp_live_... token the plugin sends
   status          text not null default 'pending'
-                    check (status in ('pending','approved','active','expired','rejected')),
+                    check (status in ('pending','approved','active','paused','expired','rejected')),
   categories      text[] not null default '{}',     -- selected category names -> sync-feed filter
   renewal_date    date,
   expiry_date     date,                              -- = activation/renewal + 1 month

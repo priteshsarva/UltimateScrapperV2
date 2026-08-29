@@ -5,7 +5,64 @@
 //     their products after the 3-day grace, via the existing expiry flow)
 import { query } from "./db.js";
 import { generateInvoiceForEnrollment } from "./billing.js";
-import { sendReminderEmail } from "./mailer.js";
+import { sendReminderEmail, sendMail } from "./mailer.js";
+import { notify } from "./notifications.js";
+import { runCatalogueScan } from "./catalogueScan.js";
+
+// Hosted storefronts get a 5-day grace after their plan expires: the store stays
+// live, but the owner is emailed (up to 3×/day) and gets an in-portal notification.
+// Unpaid past the grace window → the store auto-pauses (resolveStore 404s it).
+const HOSTED_GRACE_DAYS = 5;
+
+export async function hostedExpiryTick() {
+  const overdue = (await query(
+    `select e.id, e.slug, e.expiry_date, e.last_reminder_at, u.id as user_id, u.email, u.name,
+            (e.expiry_date + interval '${HOSTED_GRACE_DAYS} days') as pause_at
+       from enrollments e join users u on u.id = e.user_id
+      where e.type = 'hosted' and e.status = 'active'
+        and e.expiry_date is not null and e.expiry_date < now()`
+  )).rows;
+
+  let reminders = 0, paused = 0, notified = 0;
+  for (const s of overdue) {
+    const graceEnds = new Date(s.pause_at);
+    // past the grace window → pause the store
+    if (graceEnds < new Date()) {
+      await query(`update enrollments set status='paused' where id=$1`, [s.id]);
+      await notify({ user_id: s.user_id, type: "store_paused", title: `"${s.slug}" has been paused`,
+        body: `Your storefront was paused after ${HOSTED_GRACE_DAYS} days unpaid past expiry. Renew to bring it back online.` });
+      try {
+        await sendMail({ to: s.email, subject: `Your storefront ${s.slug} has been paused`,
+          text: `Hi ${s.name || ""},\n\nYour storefront "${s.slug}" was paused because the renewal wasn't paid within ${HOSTED_GRACE_DAYS} days of expiry. Renew from your portal to bring it back online.` });
+      } catch (e) { console.error("[hosted] pause email:", e.message); }
+      paused++;
+      continue;
+    }
+
+    // in grace → email at most once every 3h (cron runs 3×/day → ~3 emails/day)
+    const last = s.last_reminder_at ? new Date(s.last_reminder_at).getTime() : 0;
+    if (Date.now() - last >= 3 * 3600 * 1000) {
+      try {
+        await sendMail({ to: s.email, subject: `Action needed — renew ${s.slug} to keep it live`,
+          text: `Hi ${s.name || ""},\n\nYour plan for "${s.slug}" has expired. The store stays live until ${graceEnds.toDateString()}, after which it will pause automatically. Renew now from your portal to avoid interruption.` });
+        await query(`update enrollments set last_reminder_at=now() where id=$1`, [s.id]);
+        reminders++;
+      } catch (e) { console.error("[hosted] reminder email:", e.message); }
+    }
+
+    // one in-portal notification per day
+    const dup = (await query(
+      `select 1 from platform_notifications where user_id=$1 and type='store_expiring' and created_at >= date_trunc('day', now()) limit 1`,
+      [s.user_id]
+    )).rows[0];
+    if (!dup) {
+      await notify({ user_id: s.user_id, type: "store_expiring", title: `"${s.slug}" needs renewal`,
+        body: `Your plan expired. Renew before ${graceEnds.toDateString()} or the store will pause.` });
+      notified++;
+    }
+  }
+  return { reminders, paused, notified };
+}
 
 export async function billingTick() {
   // 1) renewal invoices: active shops within 7 days of expiry
@@ -43,6 +100,7 @@ export async function billingTick() {
   const expired = await query(
     `update enrollments set status='expired'
       where status in ('approved','active')
+        and (expiry_date is null or expiry_date < now())
         and id in (
           select enrollment_id from invoices
            where status in ('created','pending') and due_date < now() and enrollment_id is not null
@@ -57,12 +115,27 @@ export async function billingTick() {
 // If not installed, call billingTick() from an external cron hitting
 // POST /portal/admin/shops/run-billing-tick instead.
 export function startScheduler() {
+  // On every server start: refresh categories + brands from the product DBs, and
+  // notify the admin about any new brands that still need a mapping. Deferred a
+  // few seconds so it doesn't compete with startup.
+  setTimeout(() => {
+    runCatalogueScan().then((r) => console.log("[scan] startup", r)).catch((e) => console.error("[scan] startup:", e.message));
+  }, 4000);
+
   import("node-cron")
     .then((cron) => {
       cron.default.schedule("0 8 * * *", () => {
         billingTick().then((r) => console.log("[billing] tick", r)).catch((e) => console.error("[billing] tick:", e.message));
       });
-      console.log("[billing] daily scheduler armed for 08:00");
+      // hosted expiry: 3×/day so grace reminders go out ~3 times daily
+      cron.default.schedule("0 8,14,20 * * *", () => {
+        hostedExpiryTick().then((r) => console.log("[hosted] expiry tick", r)).catch((e) => console.error("[hosted] expiry tick:", e.message));
+      });
+      // daily catalogue scan: categories + brands from the product DBs
+      cron.default.schedule("30 7 * * *", () => {
+        runCatalogueScan().then((r) => console.log("[scan] daily", r)).catch((e) => console.error("[scan] daily:", e.message));
+      });
+      console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30");
     })
     .catch(() => console.warn("[billing] node-cron not installed — trigger billingTick via the admin endpoint or system cron"));
 }
