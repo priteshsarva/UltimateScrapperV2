@@ -892,20 +892,34 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
     await client.query("BEGIN");
 
     // Auto-create (or reuse) a customer account for guest checkouts so the order
-    // is tracked under an account. A guest account has no password ("unclaimed")
-    // until the buyer signs up with the same email and sets one.
+    // is tracked under an account, and LOG THE BUYER IN afterwards by handing back
+    // a session token. A guest account has no password ("unclaimed") until the
+    // buyer signs up with the same email and sets one.
+    //   - new email            -> create the account + issue a login token
+    //   - existing UNCLAIMED    -> reuse it + issue a login token (they're a guest)
+    //   - existing CLAIMED      -> attach the order, but NEVER issue a token on an
+    //                              email alone (that would hijack a password-
+    //                              protected account); the buyer must log in.
     let customerId = req.customer ? req.customer.sub : null;
-    if (!customerId && email) {
+    let loginToken = null;      // set when we can safely log the buyer in
+    let accountExists = false;  // a password-protected account already owns this email
+    const cleanEmail = email ? String(email).toLowerCase().trim() : null;
+    if (!customerId && cleanEmail) {
       const existing = (await client.query(
-        `select id from customers where enrollment_id=$1 and lower(email)=lower($2)`, [enr.id, email]
+        `select id, password_hash from customers where enrollment_id=$1 and lower(email)=lower($2)`, [enr.id, cleanEmail]
       )).rows[0];
-      customerId = existing
-        ? existing.id
-        : (await client.query(
-            `insert into customers (enrollment_id, email, password_hash, name, phone)
-             values ($1,$2,null,$3,$4) returning id`,
-            [enr.id, String(email).toLowerCase().trim(), name, phone]
-          )).rows[0].id;
+      if (existing) {
+        customerId = existing.id;
+        if (existing.password_hash) accountExists = true;
+        else loginToken = signCustomerToken({ id: existing.id, enrollment_id: enr.id, email: cleanEmail });
+      } else {
+        customerId = (await client.query(
+          `insert into customers (enrollment_id, email, password_hash, name, phone)
+           values ($1,$2,null,$3,$4) returning id`,
+          [enr.id, cleanEmail, name, phone]
+        )).rows[0].id;
+        loginToken = signCustomerToken({ id: customerId, enrollment_id: enr.id, email: cleanEmail });
+      }
     }
 
     const order = (await client.query(
@@ -948,7 +962,11 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
       } catch (e) { console.error("[order-email vendor] lookup failed:", e.message); }
     })();
 
-    res.json({ order_no: order.order_no, total: subtotal, wa_url });
+    // Hand back a session when we could safely create/reuse an unclaimed account,
+    // so the buyer is logged in right after checkout. account_exists tells the
+    // storefront to invite them to log in to their existing (password) account.
+    const loginCustomer = loginToken ? { id: customerId, email: cleanEmail, name, phone } : null;
+    res.json({ order_no: order.order_no, total: subtotal, wa_url, token: loginToken, customer: loginCustomer, account_exists: accountExists });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
