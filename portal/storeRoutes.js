@@ -257,6 +257,7 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     slug: enr.slug,
     store_name: site.store_name || enr.slug,
     logo_url: site.logo_url || null,
+    favicon_url: site.favicon_url || null,
     theme: site.theme || {},
     whatsapp: site.whatsapp || null,
     email: site.email || null,
