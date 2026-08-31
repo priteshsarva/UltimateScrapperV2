@@ -14,7 +14,8 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
-import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, productPageUrl } from "./storeRoutes.js";
+import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, listSiteRawBrands, productPageUrl } from "./storeRoutes.js";
+import { invalidateBrandMap } from "./brandMap.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -316,6 +317,28 @@ clientRouter.get("/hosted-sites/:id/subbrands", asyncH(async (req, res) => {
   const brand = (req.query.brand || "").toString();
   if (!category || !brand) return res.json({ subbrands: [] });
   res.json({ subbrands: await listSiteSubBrands(req.params.id, category, brand) });
+}));
+
+// GET /portal/hosted-sites/:id/all-brands  -> this store's raw brands + current global mapping
+clientRouter.get("/hosted-sites/:id/all-brands", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  res.json({ brands: await listSiteRawBrands(req.params.id) });
+}));
+
+// PUT /portal/hosted-sites/:id/brand-map  { raw, canonical, secondary? }  -> upsert the GLOBAL brand map
+clientRouter.put("/hosted-sites/:id/brand-map", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const raw = (req.body?.raw || "").toString().trim();
+  const canonical = (req.body?.canonical || "").toString().trim();
+  const secondary = (req.body?.secondary || "").toString().trim() || null;
+  if (!raw || !canonical) return res.status(400).json({ error: "raw and primary brand required" });
+  await query(
+    `insert into brand_map (raw, canonical, secondary) values ($1,$2,$3)
+     on conflict (raw) do update set canonical = excluded.canonical, secondary = excluded.secondary, updated_at = now()`,
+    [raw.toLowerCase(), canonical, secondary]
+  );
+  invalidateBrandMap();
+  res.json({ ok: true });
 }));
 
 // GET /portal/hosted-sites/presets  -> shipped homepage presets

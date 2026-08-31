@@ -156,6 +156,33 @@ export async function listSiteSubBrands(enrollmentId, dbName, primary) {
   return [...sub].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Every raw scraped brand across this store's sources, with its current GLOBAL
+// mapping — powers the per-store brand-mapping panel (map right where you edit
+// the store, instead of the separate admin screen).
+export async function listSiteRawBrands(enrollmentId) {
+  const allSources = await loadVendorSources(enrollmentId);
+  const dbNames = [...new Set(allSources.map((s) => s.db_name))];
+  const merged = new Map();
+  for (const db of dbNames) {
+    const catSrc = allSources.filter((s) => s.db_name === db);
+    const p = [];
+    const scope = `(${sourceClauseSql(catSrc, p)}) AND productBrand IS NOT NULL AND TRIM(productBrand) != ''`;
+    const rows = await runReadonly(
+      db,
+      `SELECT productBrand brand, COUNT(*) n FROM PRODUCTS WHERE ${scope}
+        GROUP BY LOWER(productBrand) HAVING n >= 2 AND LENGTH(productBrand) <= 60`,
+      p
+    ).catch(() => []);
+    for (const r of rows) merged.set(r.brand, (merged.get(r.brand) || 0) + Number(r.n));
+  }
+  const out = [];
+  for (const [name, count] of merged) {
+    const info = await brandInfo(name);
+    out.push({ name, count, canonical: (info && info.primary) || null, secondary: (info && info.secondary) || null });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // rewrite a row's scraped catName to the vendor's canonical name, using the map
 // of whichever source the row actually came from. Mutates + returns the row.
 function applyCatMap(row, catSources) {
@@ -666,11 +693,13 @@ router.get("/:slug/menu", resolveStore, asyncH(async (req, res) => {
     ).catch(() => []);
 
     const bySub = new Map(); // canonical subcat -> Map(canonical brand -> count)
+    const mappedSub = new Set(); // sub-cats that came from the vendor's category map
     for (const r of rows) {
       const src = catSrc.find((s) => String(r.ff || "").includes(s.search_key));
       const canonCat = (src && src.catMap && src.catMap[r.catName]);
       if (!canonCat && !showUnmapped) continue;
       const subName = canonCat || r.catName;
+      if (canonCat) mappedSub.add(subName);
       if (!bySub.has(subName)) bySub.set(subName, new Map());
       if (r.brand && String(r.brand).trim()) {
         const brand = await canonicalBrand(r.brand);
@@ -687,7 +716,7 @@ router.get("/:slug/menu", resolveStore, asyncH(async (req, res) => {
         const bc = curatedForDb.includes(b.name.toLowerCase()) ? 0 : 1;
         return ac !== bc ? ac - bc : b.count - a.count;
       });
-      return { name, brands: brands.slice(0, 12).map((b) => b.name) };
+      return { name, mapped: mappedSub.has(name), brands: brands.slice(0, 12).map((b) => b.name) };
     }).sort((a, b) => a.name.localeCompare(b.name));
 
     menu.push({ category: db, label: labelOf(db), subcategories });
