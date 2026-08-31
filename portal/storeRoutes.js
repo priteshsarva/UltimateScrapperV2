@@ -32,6 +32,10 @@ const refreshing = new Set();
 const lastAttempt = new Map();
 const RETRY_COOLDOWN_MS = 60 * 1000;
 const MAX_INFLIGHT = Math.max(1, parseInt(process.env.REFRESH_MAX_INFLIGHT, 10) || 4);
+// A shopper opening a product page live-refreshes it when it's older than this.
+// Shorter than the plugin's bulk staleness (a single view is one product, capped
+// by MAX_INFLIGHT + the per-product cooldown). Default 1 hour.
+const STOREFRONT_STALE_MS = Math.max(60 * 1000, parseInt(process.env.STOREFRONT_STALE_MS, 10) || 60 * 60 * 1000);
 
 const router = Router();
 
@@ -756,7 +760,10 @@ router.post("/:slug/products/:dbName/:id/refresh", resolveStore, asyncH(async (r
   if (!product || !rowBelongsToSources(product, catSources))
     return res.status(404).json({ error: "Not found" });
 
-  if (!isStale(product)) return res.json({ status: "fresh" });
+  // stale for a page view = older than 1h (vs the plugin's 3-day bulk window)
+  const ts = parseInt(product.productLastUpdated, 10);
+  const staleForView = Number.isFinite(ts) && Date.now() - ts >= STOREFRONT_STALE_MS;
+  if (!staleForView) return res.json({ status: "fresh" });
 
   const key = dbName + ":" + id;
   const recentlyTried = lastAttempt.has(key) && Date.now() - lastAttempt.get(key) < RETRY_COOLDOWN_MS;

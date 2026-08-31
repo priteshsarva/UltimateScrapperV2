@@ -22,9 +22,26 @@
 // The slot is returned when the browser DISCONNECTS — which fires both on a
 // normal close() and on a crash — so a dying Chrome can never leak its slot.
 
+import fs from "fs";
+
 const CHROME_MAX = Math.max(1, parseInt(process.env.CHROME_MAX, 10) || 2);
 let inUse = 0;
 const waiters = [];
+
+// The configured executablePath (PUPPETEER_EXECUTABLE_PATH, e.g. the deploy box's
+// /usr/bin/google-chrome) may not exist on THIS machine — e.g. running the server
+// locally on Windows for testing. When it's missing, fall back to the Chrome
+// puppeteer bundles so scrapes still launch. Keeps the Linux deploy unchanged
+// (the path exists there) while making local live-scrape testing just work.
+function resolveExecutablePath(puppeteer, launchOpts, label) {
+  const ep = launchOpts.executablePath;
+  if (!ep || fs.existsSync(ep)) return launchOpts;
+  let bundled = null;
+  try { bundled = puppeteer.executablePath(); } catch { /* none available */ }
+  const usable = bundled && fs.existsSync(bundled) ? bundled : undefined;
+  console.warn(`⚠️ [${label}] Chrome not found at ${ep} — ${usable ? `using bundled ${usable}` : "letting puppeteer auto-detect"}`);
+  return { ...launchOpts, executablePath: usable };
+}
 
 function acquireSlot(label) {
     if (inUse < CHROME_MAX) { inUse++; return Promise.resolve(); }
@@ -39,6 +56,7 @@ function releaseSlot() {
 }
 
 export async function launchWithPage(puppeteer, launchOpts, { label = "chrome", attempts = 3, backoffMs = 3000 } = {}) {
+    launchOpts = resolveExecutablePath(puppeteer, launchOpts, label);
     await acquireSlot(label);
     let lastErr;
     try {
