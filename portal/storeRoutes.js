@@ -156,31 +156,17 @@ export async function listSiteSubBrands(enrollmentId, dbName, primary) {
   return [...sub].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// Every raw scraped brand across this store's sources, with its current GLOBAL
-// mapping — powers the per-store brand-mapping panel (map right where you edit
-// the store, instead of the separate admin screen).
-export async function listSiteRawBrands(enrollmentId) {
-  const allSources = await loadVendorSources(enrollmentId);
-  const dbNames = [...new Set(allSources.map((s) => s.db_name))];
-  const merged = new Map();
-  for (const db of dbNames) {
-    const catSrc = allSources.filter((s) => s.db_name === db);
-    const p = [];
-    const scope = `(${sourceClauseSql(catSrc, p)}) AND productBrand IS NOT NULL AND TRIM(productBrand) != ''`;
-    const rows = await runReadonly(
-      db,
-      `SELECT productBrand brand, COUNT(*) n FROM PRODUCTS WHERE ${scope}
-        GROUP BY LOWER(productBrand) HAVING n >= 2 AND LENGTH(productBrand) <= 60`,
-      p
-    ).catch(() => []);
-    for (const r of rows) merged.set(r.brand, (merged.get(r.brand) || 0) + Number(r.n));
-  }
-  const out = [];
-  for (const [name, count] of merged) {
-    const info = await brandInfo(name);
-    out.push({ name, count, canonical: (info && info.primary) || null, secondary: (info && info.secondary) || null });
-  }
-  return out.sort((a, b) => a.name.localeCompare(b.name));
+// catName -> its ORIGINAL supplier category URL (catSlug), read from the scraped
+// CATEGORIES table for a db. Powers the "original link" in the category panel.
+export async function categoryOriginalUrls(dbName) {
+  const rows = await runReadonly(
+    dbName,
+    `SELECT catName, catSlug FROM CATEGORIES WHERE catSlug IS NOT NULL AND TRIM(catSlug) != ''`,
+    []
+  ).catch(() => []);
+  const m = new Map();
+  for (const r of rows) if (r.catName) m.set(String(r.catName), r.catSlug);
+  return m;
 }
 
 // rewrite a row's scraped catName to the vendor's canonical name, using the map

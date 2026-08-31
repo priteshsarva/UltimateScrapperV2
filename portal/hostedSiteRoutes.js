@@ -14,8 +14,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
-import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, listSiteRawBrands, productPageUrl } from "./storeRoutes.js";
-import { invalidateBrandMap } from "./brandMap.js";
+import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOriginalUrls, productPageUrl } from "./storeRoutes.js";
 import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
@@ -320,18 +319,15 @@ clientRouter.get("/hosted-sites/:id/subbrands", asyncH(async (req, res) => {
   res.json({ subbrands: await listSiteSubBrands(req.params.id, category, brand) });
 }));
 
-// GET /portal/hosted-sites/:id/all-brands  -> this store's raw brands + current global mapping
-clientRouter.get("/hosted-sites/:id/all-brands", asyncH(async (req, res) => {
-  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
-  res.json({ brands: await listSiteRawBrands(req.params.id) });
-}));
-
 // GET /portal/hosted-sites/:id/all-categories  -> this store's raw categories + current mapping
 clientRouter.get("/hosted-sites/:id/all-categories", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
-  const { rows } = await query(`select id from enrollments where id=$1`, [req.params.id]);
-  if (!rows.length) return res.status(404).json({ error: "Not found" });
-  res.json({ categories: await listSiteRawCategories(req.params.id) });
+  const cats = await listSiteRawCategories(req.params.id);
+  // attach each category's ORIGINAL supplier URL (from the scraped CATEGORIES table)
+  const urlMaps = {};
+  for (const db of [...new Set(cats.map((c) => c.db_name))]) urlMaps[db] = await categoryOriginalUrls(db);
+  for (const c of cats) c.url = (urlMaps[c.db_name] && urlMaps[c.db_name].get(c.name)) || null;
+  res.json({ categories: cats });
 }));
 
 // PUT /portal/hosted-sites/:id/category-map  { db_name, cat_name, canonical }  -> store-wide upsert
@@ -342,22 +338,6 @@ clientRouter.put("/hosted-sites/:id/category-map", asyncH(async (req, res) => {
   const canonical = (req.body?.canonical || "").toString().trim();
   if (!cat_name) return res.status(400).json({ error: "cat_name required" });
   await saveSiteCategoryMapping(req.params.id, db_name, cat_name, canonical);
-  res.json({ ok: true });
-}));
-
-// PUT /portal/hosted-sites/:id/brand-map  { raw, canonical, secondary? }  -> upsert the GLOBAL brand map
-clientRouter.put("/hosted-sites/:id/brand-map", asyncH(async (req, res) => {
-  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
-  const raw = (req.body?.raw || "").toString().trim();
-  const canonical = (req.body?.canonical || "").toString().trim();
-  const secondary = (req.body?.secondary || "").toString().trim() || null;
-  if (!raw || !canonical) return res.status(400).json({ error: "raw and primary brand required" });
-  await query(
-    `insert into brand_map (raw, canonical, secondary) values ($1,$2,$3)
-     on conflict (raw) do update set canonical = excluded.canonical, secondary = excluded.secondary, updated_at = now()`,
-    [raw.toLowerCase(), canonical, secondary]
-  );
-  invalidateBrandMap();
   res.json({ ok: true });
 }));
 
