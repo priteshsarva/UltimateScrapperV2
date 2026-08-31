@@ -213,8 +213,8 @@ clientRouter.get("/hosted-sites/:id/settings", asyncH(async (req, res) => {
 }));
 
 const SETTINGS_FIELDS = ["store_name", "logo_url", "theme", "whatsapp", "email", "phone",
-  "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics", "nav", "preset"];
-const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics", "nav"]);
+  "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics", "nav", "reviews", "preset"];
+const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics", "nav", "reviews"]);
 
 clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });

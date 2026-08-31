@@ -268,7 +268,9 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     about: site.about || "",
     policies: site.policies || {},
     sections: Array.isArray(site.sections) ? site.sections : [],
+    preset: site.preset || null,
     analytics: site.analytics || {},
+    reviews: Array.isArray(site.reviews) ? site.reviews : [],
     categories,
     nav: site.nav && typeof site.nav === "object" ? site.nav : {},
   });

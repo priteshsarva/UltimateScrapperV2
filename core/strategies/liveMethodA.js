@@ -144,10 +144,13 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                         // --- PRICE ---
                         const priceEl = document.querySelector(".s_product_text #price_div h1");
                         if (priceEl && priceEl.textContent) {
-                            // strip currency/commas like the bulk crawler — /\d+/ alone
-                            // truncated "₹6,200" to 6, overwriting the real price with 6
-                            const n = priceEl.textContent.replace(/[^0-9.]/g, "");
-                            if (n) productOriginalPrice = parseFloat(n);
+                            // The price block can hold sale price + struck MRP + "% off"
+                            // (e.g. "₹1,201  ₹9,091  87% OFF"). Stripping ALL non-digits
+                            // concatenated them into 1201909187 — so take the FIRST number
+                            // only (the current/sale price). Commas dropped first so
+                            // "₹1,201" -> 1201, not 1.
+                            const m = priceEl.textContent.replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+                            if (m) productOriginalPrice = parseFloat(m[0]);
                         }
 
                         // --- AVAILABILITY (STOCK) ---
@@ -172,6 +175,18 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                         sizeName = Array.from(sizeElements).map(el => el.textContent.trim());
                     }
 
+                    // --- CATEGORY (best-effort, from the breadcrumb) ---
+                    // The last crumb is usually the product itself, so the category
+                    // is the crumb before it. Left null when no breadcrumb is present
+                    // (the merge then keeps the existing catName).
+                    let catName = null;
+                    const crumbEls = document.querySelectorAll('.breadcrumb a, .breadcrumb li, ul.breadcrumb li, nav.breadcrumb a, .breadcrumbs a, .product-breadcrumb a');
+                    const crumbTexts = Array.from(crumbEls)
+                        .map(c => (c.textContent || '').trim())
+                        .filter(t => t && t.length < 60 && !/^home$/i.test(t));
+                    if (crumbTexts.length >= 2) catName = crumbTexts[crumbTexts.length - 2];
+                    else if (crumbTexts.length === 1) catName = crumbTexts[0];
+
                     return {
                         productName,
                         productOriginalPrice,
@@ -180,6 +195,7 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                         featuredimg,
                         videoUrl,
                         sizeName,
+                        catName,
                         pageIsError,
                         hasTitle: !!titleEl
                     };
@@ -213,7 +229,8 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                 imageUrl: [],
                 featuredimg: null,
                 videoUrl: null,
-                sizeName: []
+                sizeName: [],
+                catName: null
             };
         } else {
             console.log('✅ Raw Extracted Data:', freshData);
@@ -260,18 +277,23 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
 
     // If it's out of stock (or 404), clear the sizes array
     const finalSizes = finalAvailability === 0 ? '[]' : JSON.stringify(freshData.sizeName);
+    // Category: only overwrite when we actually read one (and the page was live) —
+    // otherwise keep the crawler's stored catName so the vendor's category map
+    // keeps matching.
+    const finalCat = (!dead && freshData.catName) ? freshData.catName : existingRow.catName;
     const nowTimestamp = Date.now();
 
     const sql = `
-        UPDATE PRODUCTS 
-        SET productName = ?, 
-            productOriginalPrice = ?, 
-            availability = ?, 
-            imageUrl = ?, 
-            featuredimg = ?, 
-            videoUrl = ?, 
-            sizeName = ?, 
-            productLastUpdated = ? 
+        UPDATE PRODUCTS
+        SET productName = ?,
+            productOriginalPrice = ?,
+            availability = ?,
+            imageUrl = ?,
+            featuredimg = ?,
+            videoUrl = ?,
+            sizeName = ?,
+            catName = ?,
+            productLastUpdated = ?
         WHERE productUrl = ?
     `;
 
@@ -283,6 +305,7 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
         finalFeatured,
         finalVideo,
         finalSizes,
+        finalCat,
         nowTimestamp,
         productUrl
     ];

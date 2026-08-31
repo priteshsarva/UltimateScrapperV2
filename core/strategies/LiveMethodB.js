@@ -132,9 +132,11 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
                     const priceEl = document.querySelector(".product-right .price-wrapper span.font-bold");
                     let productOriginalPrice = null;
                     if (priceEl && priceEl.textContent) {
-                        // strip currency/commas — /\d+/ alone truncated "₹6,200" to 6
-                        const n = priceEl.textContent.replace(/[^0-9.]/g, "");
-                        if (n) productOriginalPrice = parseFloat(n);
+                        // take the FIRST number only (current price); if the block ever
+                        // holds sale + MRP + "% off", stripping all non-digits would
+                        // concatenate them. Commas dropped first so "₹6,200" -> 6200.
+                        const m = priceEl.textContent.replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+                        if (m) productOriginalPrice = parseFloat(m[0]);
                     }
 
                     // --- AVAILABILITY (STOCK) ---
@@ -173,6 +175,15 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
                     const sizeElements = document.querySelectorAll('.size-badge, .size-setup ul li a');
                     const sizeName = Array.from(sizeElements).map(el => el.textContent.trim());
 
+                    // --- CATEGORY (best-effort, from the breadcrumb) ---
+                    let catName = null;
+                    const crumbEls = document.querySelectorAll('.breadcrumb a, .breadcrumb li, ul.breadcrumb li, nav.breadcrumb a, .breadcrumbs a, .product-breadcrumb a');
+                    const crumbTexts = Array.from(crumbEls)
+                        .map(c => (c.textContent || '').trim())
+                        .filter(t => t && t.length < 60 && !/^home$/i.test(t));
+                    if (crumbTexts.length >= 2) catName = crumbTexts[crumbTexts.length - 2];
+                    else if (crumbTexts.length === 1) catName = crumbTexts[0];
+
                     return {
                         productName,
                         productOriginalPrice,
@@ -181,6 +192,7 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
                         featuredimg,
                         videoUrl,
                         sizeName,
+                        catName,
                         pageIsError,
                         hasTitle: !!titleEl
                     };
@@ -214,7 +226,8 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
                 imageUrl: [],
                 featuredimg: null,
                 videoUrl: null,
-                sizeName: []
+                sizeName: [],
+                catName: null
             };
         } else {
             console.log('✅ Raw Extracted Data:', freshData);
@@ -258,18 +271,21 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
     
     // Clear sizes if OOS
     const finalSizes = finalAvailability === 0 ? '[]' : JSON.stringify(freshData.sizeName);
+    // Category: only overwrite from a live page read; else keep the crawler's value.
+    const finalCat = (!dead && freshData.catName) ? freshData.catName : existingRow.catName;
     const nowTimestamp = Date.now();
 
     const sql = `
-        UPDATE PRODUCTS 
-        SET productName = ?, 
-            productOriginalPrice = ?, 
-            availability = ?, 
-            imageUrl = ?, 
-            featuredimg = ?, 
-            videoUrl = ?, 
-            sizeName = ?, 
-            productLastUpdated = ? 
+        UPDATE PRODUCTS
+        SET productName = ?,
+            productOriginalPrice = ?,
+            availability = ?,
+            imageUrl = ?,
+            featuredimg = ?,
+            videoUrl = ?,
+            sizeName = ?,
+            catName = ?,
+            productLastUpdated = ?
         WHERE productUrl = ?
     `;
 
@@ -281,7 +297,8 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
         finalFeatured,
         finalVideo,
         finalSizes,
-        nowTimestamp, 
+        finalCat,
+        nowTimestamp,
         productUrl
     ];
 
