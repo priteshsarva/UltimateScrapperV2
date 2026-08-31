@@ -85,6 +85,10 @@ async function loadVendorSources(enrollmentId, dbName) {
 // Distinct in-stock brands for a site's sources within one category DB. Powers
 // the portal's brand-picker — same scope + shape as the public /facets brand
 // list, so what a vendor can curate is exactly what shoppers can filter by.
+// The featurable brands for a category — CANONICAL PRIMARY brands only (raw
+// spellings folded into their primary via the brand map; sub-brands excluded),
+// deduped and alphabetical. Storing a primary as a featured brand is correct:
+// the storefront brand filter expands a primary back to all its raw variants.
 export async function listSiteBrands(enrollmentId, dbName) {
   const catSources = await loadVendorSources(enrollmentId, dbName);
   if (!catSources.length) return [];
@@ -94,11 +98,58 @@ export async function listSiteBrands(enrollmentId, dbName) {
     dbName,
     `SELECT productBrand AS brand, COUNT(*) n FROM PRODUCTS
       WHERE ${scope} AND productBrand IS NOT NULL AND TRIM(productBrand) != ''
-      GROUP BY LOWER(productBrand) HAVING n >= 2 AND LENGTH(productBrand) <= 40
-      ORDER BY n DESC LIMIT 60`,
+      GROUP BY LOWER(productBrand) HAVING n >= 2 AND LENGTH(productBrand) <= 60`,
     params
   ).catch(() => []);
-  return rows.map((r) => ({ name: r.brand, count: r.n }));
+  const primSet = await primaryBrandSet();
+  const merged = new Map();
+  for (const r of rows) {
+    const primary = await canonicalBrand(r.brand);
+    if (!primSet.has(String(primary).toLowerCase())) continue; // primaries only
+    merged.set(primary, (merged.get(primary) || 0) + Number(r.n));
+  }
+  return [...merged].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// canonical, in-stock SUB-CATEGORIES for a category (what the vendor can feature).
+export async function listSiteSubcategories(enrollmentId, dbName) {
+  const catSources = await loadVendorSources(enrollmentId, dbName);
+  if (!catSources.length) return [];
+  const p = [];
+  const scope = `(${sourceClauseSql(catSources, p)}) AND ${AVAIL_TEXT} IN ('1','true') AND CAST(productOriginalPrice AS REAL) > 0`;
+  const rows = await runReadonly(
+    dbName,
+    `SELECT productFetchedFrom ff, catName, COUNT(*) n FROM PRODUCTS
+      WHERE ${scope} AND catName IS NOT NULL AND TRIM(catName) != ''
+      GROUP BY productFetchedFrom, catName`,
+    p
+  ).catch(() => []);
+  const byName = new Map();
+  for (const r of rows) {
+    const src = catSources.find((s) => String(r.ff || "").includes(s.search_key));
+    const canon = (src && src.catMap && src.catMap[r.catName]) || r.catName;
+    byName.set(canon, (byName.get(canon) || 0) + Number(r.n));
+  }
+  return [...byName].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// in-stock SUB-BRANDS of a primary brand within a category (what the vendor can feature).
+export async function listSiteSubBrands(enrollmentId, dbName, primary) {
+  const catSources = await loadVendorSources(enrollmentId, dbName);
+  if (!catSources.length) return [];
+  const raws = [...new Set((await rawBrandsFor(primary)).map((x) => x.toLowerCase()))];
+  if (!raws.length) return [];
+  const p = [];
+  const scope = `(${sourceClauseSql(catSources, p)}) AND ${AVAIL_TEXT} IN ('1','true') AND CAST(productOriginalPrice AS REAL) > 0`;
+  const rows = await runReadonly(
+    dbName,
+    `SELECT productBrand brand, COUNT(*) n FROM PRODUCTS
+      WHERE ${scope} AND LOWER(productBrand) IN (${raws.map(() => "?").join(",")}) GROUP BY LOWER(productBrand)`,
+    [...p, ...raws]
+  ).catch(() => []);
+  const sub = new Map();
+  for (const r of rows) { const info = await brandInfo(r.brand); if (info && info.secondary) sub.set(info.secondary, (sub.get(info.secondary) || 0) + Number(r.n)); }
+  return [...sub].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // rewrite a row's scraped catName to the vendor's canonical name, using the map
@@ -257,6 +308,7 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     slug: enr.slug,
     store_name: site.store_name || enr.slug,
     logo_url: site.logo_url || null,
+    favicon_url: site.favicon_url || null,
     theme: site.theme || {},
     whatsapp: site.whatsapp || null,
     email: site.email || null,

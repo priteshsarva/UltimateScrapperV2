@@ -3,6 +3,7 @@ import { dbManager } from '../models/dbManager.js';
 import { bulkSafeSyncProducts, BulkProductOutOfStock, getProductBydetails, WP_SITES, deleteProduct, fetchAllMatchingProducts, upsertProductSafe, syncProductToAllSites, markProductOutOfStock, getAuthHeader } from "../core/wpBulkSafeSync.js";
 import { scrapeSingleProductMethodA } from '../core/strategies/liveMethodA.js';
 import { scrapeSingleProductMethodB } from '../core/strategies/LiveMethodB.js';
+import { resolveMethod } from '../core/refreshProduct.js';
 import sqlite3 from 'sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -331,15 +332,15 @@ router.get('/update-single-product', async (req, res) => {
         const targetUrl = localProduct.productUrl;
         const fetchedFrom = localProduct.productFetchedFrom || targetUrl;
 
-        const siteConfig = SITES_REGISTRY.find(site =>
-            fetchedFrom.includes(site.base_url) || fetchedFrom.includes(site.searchKey)
-        );
+        // Method comes from the LIVE Postgres source registry first, then the
+        // static SITES_REGISTRY — so admin-added sources also get a live scrape.
+        const method = await resolveMethod(fetchedFrom);
 
-        if (!siteConfig) {
+        if (!method) {
             return res.status(400).json({ error: "Cannot identify scraper site config for this product." });
         }
 
-        console.log(`⚙️ Identified Method: ${siteConfig.method} from Site: ${siteConfig.name}`);
+        console.log(`⚙️ Identified Method: ${method}`);
 
         // =====================================
         // 5. TRIGGER THE LIVE SCRAPER
@@ -347,10 +348,10 @@ router.get('/update-single-product', async (req, res) => {
         let freshProductData = null;
 
         try {
-            if (siteConfig.method === "METHOD_A") {
+            if (method === "METHOD_A") {
                 console.log("🚀 Firing Single Scraper Method A...");
                 freshProductData = await scrapeSingleProductMethodA(targetUrl, targetDbName);
-            } else if (siteConfig.method === "METHOD_B") {
+            } else if (method === "METHOD_B") {
                 console.log("🚀 Firing Single Scraper Method B...");
                 freshProductData = await scrapeSingleProductMethodB(targetUrl, targetDbName);
             } else {
