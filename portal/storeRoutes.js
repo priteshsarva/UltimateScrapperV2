@@ -85,6 +85,10 @@ async function loadVendorSources(enrollmentId, dbName) {
 // Distinct in-stock brands for a site's sources within one category DB. Powers
 // the portal's brand-picker — same scope + shape as the public /facets brand
 // list, so what a vendor can curate is exactly what shoppers can filter by.
+// The featurable brands for a category — CANONICAL PRIMARY brands only (raw
+// spellings folded into their primary via the brand map; sub-brands excluded),
+// deduped and alphabetical. Storing a primary as a featured brand is correct:
+// the storefront brand filter expands a primary back to all its raw variants.
 export async function listSiteBrands(enrollmentId, dbName) {
   const catSources = await loadVendorSources(enrollmentId, dbName);
   if (!catSources.length) return [];
@@ -94,11 +98,17 @@ export async function listSiteBrands(enrollmentId, dbName) {
     dbName,
     `SELECT productBrand AS brand, COUNT(*) n FROM PRODUCTS
       WHERE ${scope} AND productBrand IS NOT NULL AND TRIM(productBrand) != ''
-      GROUP BY LOWER(productBrand) HAVING n >= 2 AND LENGTH(productBrand) <= 40
-      ORDER BY n DESC LIMIT 60`,
+      GROUP BY LOWER(productBrand) HAVING n >= 2 AND LENGTH(productBrand) <= 60`,
     params
   ).catch(() => []);
-  return rows.map((r) => ({ name: r.brand, count: r.n }));
+  const primSet = await primaryBrandSet();
+  const merged = new Map();
+  for (const r of rows) {
+    const primary = await canonicalBrand(r.brand);
+    if (!primSet.has(String(primary).toLowerCase())) continue; // primaries only
+    merged.set(primary, (merged.get(primary) || 0) + Number(r.n));
+  }
+  return [...merged].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // rewrite a row's scraped catName to the vendor's canonical name, using the map
