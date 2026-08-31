@@ -14,7 +14,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
-import { listSiteBrands, productPageUrl } from "./storeRoutes.js";
+import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, productPageUrl } from "./storeRoutes.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -299,6 +299,23 @@ clientRouter.get("/hosted-sites/:id/brands", asyncH(async (req, res) => {
   const category = (req.query.category || "").toString();
   if (!category) return res.json({ brands: [] });
   res.json({ brands: await listSiteBrands(req.params.id, category) });
+}));
+
+// GET /portal/hosted-sites/:id/subcategories?category=  -> featurable sub-categories
+clientRouter.get("/hosted-sites/:id/subcategories", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const category = (req.query.category || "").toString();
+  if (!category) return res.json({ subcategories: [] });
+  res.json({ subcategories: await listSiteSubcategories(req.params.id, category) });
+}));
+
+// GET /portal/hosted-sites/:id/subbrands?category=&brand=  -> featurable sub-brands of a brand
+clientRouter.get("/hosted-sites/:id/subbrands", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const category = (req.query.category || "").toString();
+  const brand = (req.query.brand || "").toString();
+  if (!category || !brand) return res.json({ subbrands: [] });
+  res.json({ subbrands: await listSiteSubBrands(req.params.id, category, brand) });
 }));
 
 // GET /portal/hosted-sites/presets  -> shipped homepage presets

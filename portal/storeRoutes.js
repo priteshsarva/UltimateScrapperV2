@@ -111,6 +111,47 @@ export async function listSiteBrands(enrollmentId, dbName) {
   return [...merged].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// canonical, in-stock SUB-CATEGORIES for a category (what the vendor can feature).
+export async function listSiteSubcategories(enrollmentId, dbName) {
+  const catSources = await loadVendorSources(enrollmentId, dbName);
+  if (!catSources.length) return [];
+  const p = [];
+  const scope = `(${sourceClauseSql(catSources, p)}) AND ${AVAIL_TEXT} IN ('1','true') AND CAST(productOriginalPrice AS REAL) > 0`;
+  const rows = await runReadonly(
+    dbName,
+    `SELECT productFetchedFrom ff, catName, COUNT(*) n FROM PRODUCTS
+      WHERE ${scope} AND catName IS NOT NULL AND TRIM(catName) != ''
+      GROUP BY productFetchedFrom, catName`,
+    p
+  ).catch(() => []);
+  const byName = new Map();
+  for (const r of rows) {
+    const src = catSources.find((s) => String(r.ff || "").includes(s.search_key));
+    const canon = (src && src.catMap && src.catMap[r.catName]) || r.catName;
+    byName.set(canon, (byName.get(canon) || 0) + Number(r.n));
+  }
+  return [...byName].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// in-stock SUB-BRANDS of a primary brand within a category (what the vendor can feature).
+export async function listSiteSubBrands(enrollmentId, dbName, primary) {
+  const catSources = await loadVendorSources(enrollmentId, dbName);
+  if (!catSources.length) return [];
+  const raws = [...new Set((await rawBrandsFor(primary)).map((x) => x.toLowerCase()))];
+  if (!raws.length) return [];
+  const p = [];
+  const scope = `(${sourceClauseSql(catSources, p)}) AND ${AVAIL_TEXT} IN ('1','true') AND CAST(productOriginalPrice AS REAL) > 0`;
+  const rows = await runReadonly(
+    dbName,
+    `SELECT productBrand brand, COUNT(*) n FROM PRODUCTS
+      WHERE ${scope} AND LOWER(productBrand) IN (${raws.map(() => "?").join(",")}) GROUP BY LOWER(productBrand)`,
+    [...p, ...raws]
+  ).catch(() => []);
+  const sub = new Map();
+  for (const r of rows) { const info = await brandInfo(r.brand); if (info && info.secondary) sub.set(info.secondary, (sub.get(info.secondary) || 0) + Number(r.n)); }
+  return [...sub].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // rewrite a row's scraped catName to the vendor's canonical name, using the map
 // of whichever source the row actually came from. Mutates + returns the row.
 function applyCatMap(row, catSources) {
