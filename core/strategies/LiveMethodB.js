@@ -132,9 +132,11 @@ export async function scrapeSingleProductMethodB(productUrl, dbName) {
                     const priceEl = document.querySelector(".product-right .price-wrapper span.font-bold");
                     let productOriginalPrice = null;
                     if (priceEl && priceEl.textContent) {
-                        // strip currency/commas — /\d+/ alone truncated "₹6,200" to 6
-                        const n = priceEl.textContent.replace(/[^0-9.]/g, "");
-                        if (n) productOriginalPrice = parseFloat(n);
+                        // take the FIRST number only (current price); if the block ever
+                        // holds sale + MRP + "% off", stripping all non-digits would
+                        // concatenate them. Commas dropped first so "₹6,200" -> 6200.
+                        const m = priceEl.textContent.replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+                        if (m) productOriginalPrice = parseFloat(m[0]);
                     }
 
                     // --- AVAILABILITY (STOCK) ---

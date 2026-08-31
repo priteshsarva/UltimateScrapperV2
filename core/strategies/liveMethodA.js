@@ -144,10 +144,13 @@ export async function scrapeSingleProductMethodA(productUrl, dbName) {
                         // --- PRICE ---
                         const priceEl = document.querySelector(".s_product_text #price_div h1");
                         if (priceEl && priceEl.textContent) {
-                            // strip currency/commas like the bulk crawler — /\d+/ alone
-                            // truncated "₹6,200" to 6, overwriting the real price with 6
-                            const n = priceEl.textContent.replace(/[^0-9.]/g, "");
-                            if (n) productOriginalPrice = parseFloat(n);
+                            // The price block can hold sale price + struck MRP + "% off"
+                            // (e.g. "₹1,201  ₹9,091  87% OFF"). Stripping ALL non-digits
+                            // concatenated them into 1201909187 — so take the FIRST number
+                            // only (the current/sale price). Commas dropped first so
+                            // "₹1,201" -> 1201, not 1.
+                            const m = priceEl.textContent.replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+                            if (m) productOriginalPrice = parseFloat(m[0]);
                         }
 
                         // --- AVAILABILITY (STOCK) ---
