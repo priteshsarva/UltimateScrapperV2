@@ -37,6 +37,7 @@ create table if not exists site_settings (
   about         text,
   policies      jsonb not null default '{}'::jsonb,  -- { shipping, returns, privacy, terms } text blocks
   pricing       jsonb not null default '{}'::jsonb,  -- markup bands; empty = platform default bands
+  preview_password text,                             -- shareable password to view the store while it's not live yet
   updated_at    timestamptz not null default now()
 );
 

@@ -83,7 +83,13 @@ clientRouter.post("/hosted-sites", asyncH(async (req, res) => {
     [req.user.sub, `${finalSlug}.hosted`, finalSlug, generateEnrollmentKey()]
   )).rows[0];
 
-  await query(`insert into site_settings (enrollment_id, store_name) values ($1,$2)`, [enr.id, store_name]);
+  // A shareable preview password so the owner can view/share the store before it
+  // goes live (see /store/:slug/preview-unlock). Readable, not high-security.
+  const previewPw = Math.random().toString(36).slice(2, 8);
+  await query(
+    `insert into site_settings (enrollment_id, store_name, preview_password) values ($1,$2,$3)`,
+    [enr.id, store_name, previewPw]
+  );
   res.json({ site: enr });
 }));
 
@@ -104,7 +110,7 @@ clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at,
             e.custom_domain, e.custom_domain_verified_at,
-            s.store_name, s.logo_url
+            s.store_name, s.logo_url, s.preview_password
        from enrollments e left join site_settings s on s.enrollment_id = e.id
       where e.user_id=$1 and e.type='hosted'
       order by e.created_at desc`,

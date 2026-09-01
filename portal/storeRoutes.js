@@ -13,6 +13,7 @@ import { query, pool } from "./db.js";
 import { resolveStore } from "./resolveStore.js";
 import {
   hashPassword, comparePassword, signCustomerToken, identifyCustomer, requireCustomer,
+  signPreviewToken,
 } from "./customerAuth.js";
 import { priceProduct, priceSqlExpr } from "./pricing.js";
 import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer.js";
@@ -342,7 +343,25 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     reviews: Array.isArray(site.reviews) ? site.reviews : [],
     categories,
     nav: site.nav && typeof site.nav === "object" ? site.nav : {},
+    // preview gating: live stores are public; non-live stores render only for a
+    // holder of a valid preview token, and show a "not live yet" watermark.
+    live: !!req.storeIsLive,
+    preview: !req.storeIsLive,
+    preview_required: !req.storeUnlocked,
   });
+}));
+
+// POST /:slug/preview-unlock { password } -> preview token if it matches the
+// store's shareable preview password. Lets a not-yet-live store be viewed.
+router.post("/:slug/preview-unlock", resolveStore, asyncH(async (req, res) => {
+  const enr = req.storeEnrollment;
+  if (req.storeIsLive) return res.json({ token: null, live: true }); // already public
+  const { password } = req.body || {};
+  const site = await loadSiteSettings(enr.id);
+  const expected = (site.preview_password || "").trim();
+  if (!expected || String(password || "").trim() !== expected)
+    return res.status(401).json({ error: "Wrong preview password" });
+  res.json({ token: signPreviewToken(enr.id) });
 }));
 
 // ============================================================ products
