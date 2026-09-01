@@ -16,6 +16,7 @@ import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
 import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOriginalUrls, productPageUrl } from "./storeRoutes.js";
 import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
+import { sendMail } from "./mailer.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -91,6 +92,26 @@ clientRouter.post("/hosted-sites", asyncH(async (req, res) => {
     [enr.id, store_name, previewPw]
   );
   res.json({ site: enr });
+}));
+
+// POST /portal/setup-requests  { message? }  -> "have your team set up my store (₹499)"
+// lead. Emails the platform admin and drops the requester a confirmation note.
+clientRouter.post("/setup-requests", asyncH(async (req, res) => {
+  const u = (await query(`select email, name, mobile from users where id=$1`, [req.user.sub])).rows[0] || {};
+  const message = String(req.body?.message || "").slice(0, 1000);
+  const admin = process.env.ADMIN_EMAIL;
+  if (admin) {
+    await sendMail({
+      to: admin,
+      subject: "Professional store setup request (₹499)",
+      text: `${u.name || "A client"} (${u.email || "?"}${u.mobile ? ", " + u.mobile : ""}) wants the team to set up their store for ₹499.\n\n${message || "(no message)"}`,
+    }).catch((e) => console.error("setup-request mail failed:", e.message));
+  }
+  await query(
+    `insert into notifications (user_id, type, text) values ($1,'system',$2)`,
+    [req.user.sub, "Thanks! We got your request for professional store setup (₹499). Our team will reach out shortly."]
+  ).catch(() => {});
+  res.json({ ok: true });
 }));
 
 // POST /portal/hosted-sites/:id/submit  -> draft -> pending (Submit for review).
