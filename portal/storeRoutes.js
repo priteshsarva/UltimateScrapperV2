@@ -364,6 +364,25 @@ router.post("/:slug/preview-unlock", resolveStore, asyncH(async (req, res) => {
   res.json({ token: signPreviewToken(enr.id) });
 }));
 
+// POST /:slug/track  { event, product_id?, db_name?, value?, session_id?, meta? }
+// First-party analytics beacon. Fire-and-forget from the storefront. Only live
+// stores are recorded — preview views would skew a vendor's numbers.
+const TRACK_EVENTS = new Set(["page_view", "view_item", "add_to_cart", "begin_checkout", "search"]);
+router.post("/:slug/track", resolveStore, asyncH(async (req, res) => {
+  if (!req.storeIsLive) return res.json({ ok: true, skipped: true });
+  const { event, product_id, db_name, value, session_id, meta } = req.body || {};
+  if (!TRACK_EVENTS.has(event)) return res.status(400).json({ error: "unknown event" });
+  await query(
+    `insert into store_events (enrollment_id, event, product_id, db_name, value, session_id, meta)
+     values ($1,$2,$3,$4,$5,$6,$7)`,
+    [req.storeEnrollment.id, event, product_id ? String(product_id).slice(0, 64) : null,
+     db_name ? String(db_name).slice(0, 64) : null, Number(value) || null,
+     session_id ? String(session_id).slice(0, 64) : null,
+     meta && typeof meta === "object" ? meta : {}]
+  );
+  res.json({ ok: true });
+}));
+
 // ============================================================ products
 
 // Builds the shared WHERE for a listing/facets query from the request:

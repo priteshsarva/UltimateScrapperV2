@@ -45,6 +45,23 @@ create table if not exists site_settings (
 -- 3. customers: per-vendor shopper accounts (vendorA's buyers invisible to vendorB)
 --    Same email may register independently on different vendor sites.
 -- ============================================================
+-- First-party storefront analytics events (no GA/dataLayer — ad-blockers eat
+-- those). One row per tracked shopper action; the portal analytics reads these
+-- plus the orders table. Purchases come from orders, not here.
+create table if not exists store_events (
+  id            bigserial primary key,
+  enrollment_id uuid not null references enrollments(id) on delete cascade,
+  event         text not null,            -- page_view | view_item | add_to_cart | begin_checkout | search
+  product_id    text,
+  db_name       text,
+  value         numeric(12,2),            -- displayed price, when known
+  session_id    text,                     -- anonymous per-tab id, for session/conversion counts
+  meta          jsonb not null default '{}'::jsonb,
+  created_at    timestamptz not null default now()
+);
+create index if not exists idx_store_events_enr_time  on store_events(enrollment_id, created_at);
+create index if not exists idx_store_events_enr_event on store_events(enrollment_id, event, created_at);
+
 create table if not exists customers (
   id            uuid primary key default gen_random_uuid(),
   enrollment_id uuid not null references enrollments(id) on delete cascade,
