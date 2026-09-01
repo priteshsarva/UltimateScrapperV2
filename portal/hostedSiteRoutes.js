@@ -68,7 +68,9 @@ async function ownedSite(id, userId) {
 const clientRouter = Router();
 clientRouter.use(requireAuth);
 
-// POST /portal/hosted-sites  { store_name, slug? }  -> pending hosted enrollment
+// POST /portal/hosted-sites  { store_name, slug? }  -> DRAFT hosted enrollment.
+// Stays a draft (invisible to the admin queue) while the owner sets it up; the
+// Submit endpoint below flips it to 'pending' for review.
 clientRouter.post("/hosted-sites", asyncH(async (req, res) => {
   const { store_name, slug } = req.body || {};
   if (!store_name) return res.status(400).json({ error: "store_name required" });
@@ -76,13 +78,25 @@ clientRouter.post("/hosted-sites", asyncH(async (req, res) => {
   const finalSlug = await uniqueSlug(slugify(slug || store_name));
   const enr = (await query(
     `insert into enrollments (user_id, domain, type, slug, enrollment_key, status)
-     values ($1,$2,'hosted',$3,$4,'pending')
+     values ($1,$2,'hosted',$3,$4,'draft')
      returning id, slug, status, created_at`,
     [req.user.sub, `${finalSlug}.hosted`, finalSlug, generateEnrollmentKey()]
   )).rows[0];
 
   await query(`insert into site_settings (enrollment_id, store_name) values ($1,$2)`, [enr.id, store_name]);
   res.json({ site: enr });
+}));
+
+// POST /portal/hosted-sites/:id/submit  -> draft -> pending (Submit for review).
+clientRouter.post("/hosted-sites/:id/submit", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const row = (await query(
+    `update enrollments set status='pending'
+      where id=$1 and status='draft' returning id, slug, status`,
+    [req.params.id]
+  )).rows[0];
+  if (!row) return res.status(409).json({ error: "Only a draft store can be submitted for review." });
+  res.json({ site: row });
 }));
 
 // GET /portal/hosted-sites  -> my storefronts (+ custom domain state)
