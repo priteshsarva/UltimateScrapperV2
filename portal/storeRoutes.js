@@ -827,10 +827,21 @@ router.post("/:slug/auth/signup", resolveStore, asyncH(async (req, res) => {
 router.post("/:slug/auth/login", resolveStore, asyncH(async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: "email and password required" });
+  const em = String(email).toLowerCase().trim();
+
+  // Store owner / admin signing in with their PORTAL credentials on the
+  // storefront? Send them to the portal instead of a customer session. Same
+  // bcryptjs scheme as portal/auth.js, so this hash compare is valid.
+  const portalUser = (await query(
+    `select password_hash from users where lower(email)=$1`, [em]
+  )).rows[0];
+  if (portalUser && portalUser.password_hash && (await comparePassword(password, portalUser.password_hash)))
+    return res.json({ redirect_to_portal: true });
+
   const { rows } = await query(
     `select id, enrollment_id, email, name, phone, password_hash from customers
       where enrollment_id=$1 and email=$2`,
-    [req.storeEnrollment.id, String(email).toLowerCase().trim()]
+    [req.storeEnrollment.id, em]
   );
   const customer = rows[0];
   // an unclaimed guest account (auto-created at checkout) has no password yet
