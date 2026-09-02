@@ -867,13 +867,16 @@ router.post("/:slug/auth/login", resolveStore, asyncH(async (req, res) => {
   if (!email || !password) return res.status(400).json({ error: "email and password required" });
   const em = String(email).toLowerCase().trim();
 
-  // Store owner / admin signing in with their PORTAL credentials on the
-  // storefront? Send them to the portal instead of a customer session. Same
-  // bcryptjs scheme as portal/auth.js, so this hash compare is valid.
-  const portalUser = (await query(
-    `select password_hash from users where lower(email)=$1`, [em]
+  // THIS store's own owner signing in with their portal credentials? Send them
+  // to the portal instead of a customer session. Scoped to the enrollment's
+  // owner (user_id) — a different store's owner or the platform admin who does
+  // NOT own this store never gets bounced here; they're treated as a shopper.
+  // Same bcryptjs scheme as portal/auth.js, so this hash compare is valid.
+  const owner = (await query(
+    `select password_hash from users where id=$1 and lower(email)=$2`,
+    [req.storeEnrollment.user_id, em]
   )).rows[0];
-  if (portalUser && portalUser.password_hash && (await comparePassword(password, portalUser.password_hash)))
+  if (owner && owner.password_hash && (await comparePassword(password, owner.password_hash)))
     return res.json({ redirect_to_portal: true });
 
   const { rows } = await query(
