@@ -114,13 +114,16 @@ clientRouter.post("/setup-requests", asyncH(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// POST /portal/hosted-sites/:id/submit  -> draft -> pending (Submit for review).
+// POST /portal/hosted-sites/:id/submit  { plan_id? } -> draft -> pending
+// (Submit for review). Stores the chosen plan on the enrollment so the admin
+// approval → invoice flow bills the right tier.
 clientRouter.post("/hosted-sites/:id/submit", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const planId = req.body?.plan_id || null;
   const row = (await query(
-    `update enrollments set status='pending'
+    `update enrollments set status='pending', plan_id=coalesce($2, plan_id)
       where id=$1 and status='draft' returning id, slug, status`,
-    [req.params.id]
+    [req.params.id, planId]
   )).rows[0];
   if (!row) return res.status(409).json({ error: "Only a draft store can be submitted for review." });
   res.json({ site: row });
@@ -130,7 +133,7 @@ clientRouter.post("/hosted-sites/:id/submit", asyncH(async (req, res) => {
 clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at,
-            e.custom_domain, e.custom_domain_verified_at,
+            e.custom_domain, e.custom_domain_verified_at, e.plan_id,
             s.store_name, s.logo_url, s.preview_password
        from enrollments e left join site_settings s on s.enrollment_id = e.id
       where e.user_id=$1 and e.type='hosted'
