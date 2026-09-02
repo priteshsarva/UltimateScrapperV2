@@ -16,6 +16,7 @@ import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
 import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOriginalUrls, productPageUrl } from "./storeRoutes.js";
 import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
+import { sendMail } from "./mailer.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -68,7 +69,9 @@ async function ownedSite(id, userId) {
 const clientRouter = Router();
 clientRouter.use(requireAuth);
 
-// POST /portal/hosted-sites  { store_name, slug? }  -> pending hosted enrollment
+// POST /portal/hosted-sites  { store_name, slug? }  -> DRAFT hosted enrollment.
+// Stays a draft (invisible to the admin queue) while the owner sets it up; the
+// Submit endpoint below flips it to 'pending' for review.
 clientRouter.post("/hosted-sites", asyncH(async (req, res) => {
   const { store_name, slug } = req.body || {};
   if (!store_name) return res.status(400).json({ error: "store_name required" });
@@ -76,21 +79,62 @@ clientRouter.post("/hosted-sites", asyncH(async (req, res) => {
   const finalSlug = await uniqueSlug(slugify(slug || store_name));
   const enr = (await query(
     `insert into enrollments (user_id, domain, type, slug, enrollment_key, status)
-     values ($1,$2,'hosted',$3,$4,'pending')
+     values ($1,$2,'hosted',$3,$4,'draft')
      returning id, slug, status, created_at`,
     [req.user.sub, `${finalSlug}.hosted`, finalSlug, generateEnrollmentKey()]
   )).rows[0];
 
-  await query(`insert into site_settings (enrollment_id, store_name) values ($1,$2)`, [enr.id, store_name]);
+  // A shareable preview password so the owner can view/share the store before it
+  // goes live (see /store/:slug/preview-unlock). Readable, not high-security.
+  const previewPw = Math.random().toString(36).slice(2, 8);
+  await query(
+    `insert into site_settings (enrollment_id, store_name, preview_password) values ($1,$2,$3)`,
+    [enr.id, store_name, previewPw]
+  );
   res.json({ site: enr });
+}));
+
+// POST /portal/setup-requests  { message? }  -> "have your team set up my store (₹499)"
+// lead. Emails the platform admin and drops the requester a confirmation note.
+clientRouter.post("/setup-requests", asyncH(async (req, res) => {
+  const u = (await query(`select email, name, mobile from users where id=$1`, [req.user.sub])).rows[0] || {};
+  const message = String(req.body?.message || "").slice(0, 1000);
+  const admin = process.env.ADMIN_EMAIL;
+  if (admin) {
+    await sendMail({
+      to: admin,
+      subject: "Professional store setup request (₹499)",
+      text: `${u.name || "A client"} (${u.email || "?"}${u.mobile ? ", " + u.mobile : ""}) wants the team to set up their store for ₹499.\n\n${message || "(no message)"}`,
+    }).catch((e) => console.error("setup-request mail failed:", e.message));
+  }
+  await query(
+    `insert into notifications (user_id, type, text) values ($1,'system',$2)`,
+    [req.user.sub, "Thanks! We got your request for professional store setup (₹499). Our team will reach out shortly."]
+  ).catch(() => {});
+  res.json({ ok: true });
+}));
+
+// POST /portal/hosted-sites/:id/submit  { plan_id? } -> draft -> pending
+// (Submit for review). Stores the chosen plan on the enrollment so the admin
+// approval → invoice flow bills the right tier.
+clientRouter.post("/hosted-sites/:id/submit", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const planId = req.body?.plan_id || null;
+  const row = (await query(
+    `update enrollments set status='pending', plan_id=coalesce($2, plan_id)
+      where id=$1 and status='draft' returning id, slug, status`,
+    [req.params.id, planId]
+  )).rows[0];
+  if (!row) return res.status(409).json({ error: "Only a draft store can be submitted for review." });
+  res.json({ site: row });
 }));
 
 // GET /portal/hosted-sites  -> my storefronts (+ custom domain state)
 clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at,
-            e.custom_domain, e.custom_domain_verified_at,
-            s.store_name, s.logo_url
+            e.custom_domain, e.custom_domain_verified_at, e.plan_id,
+            s.store_name, s.logo_url, s.preview_password
        from enrollments e left join site_settings s on s.enrollment_id = e.id
       where e.user_id=$1 and e.type='hosted'
       order by e.created_at desc`,
@@ -148,6 +192,91 @@ clientRouter.get("/hosted-analytics", asyncH(async (req, res) => {
     [uid]
   )).rows;
   res.json({ totals, series, sites });
+}));
+
+// GET /portal/hosted-sites/:id/analytics?from=&to=  -> robust per-store report:
+// KPIs, funnel, daily series, status breakdown, top products. Orders drive money
+// (authoritative); store_events drive traffic/funnel (first-party, no dataLayer).
+clientRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
+  const id = req.params.id;
+  if (!(await ownedSite(id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+
+  // Range: default last 30 days (inclusive). 'to' counts the whole end day.
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || "") ? req.query.to : new Date().toISOString().slice(0, 10);
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || "")
+    ? req.query.from
+    : new Date(Date.now() - 29 * 864e5).toISOString().slice(0, 10);
+  const P = [id, from, to];
+  const inRange = (col) => `${col} >= $2::date and ${col} < ($3::date + 1)`;
+
+  const kpis = (await query(
+    `select coalesce(sum(o.total),0) as revenue,
+            coalesce(sum(o.total) filter (where o.status <> 'cancelled'),0) as net_revenue,
+            count(*)::int as orders,
+            count(*) filter (where o.status = 'cancelled')::int as cancelled,
+            coalesce((select sum(oi.qty) from order_items oi join orders o2 on o2.id=oi.order_id
+                       where o2.enrollment_id=$1 and ${inRange("o2.created_at")}),0)::int as units
+       from orders o where o.enrollment_id=$1 and ${inRange("o.created_at")}`, P
+  )).rows[0];
+
+  const ev = (await query(
+    `select event, count(*)::int as n, count(distinct session_id)::int as sessions
+       from store_events where enrollment_id=$1 and ${inRange("created_at")}
+      group by event`, P
+  )).rows;
+  const evCount = (e) => (ev.find((r) => r.event === e) || {}).n || 0;
+  const sessions = (await query(
+    `select count(distinct session_id)::int as s from store_events
+      where enrollment_id=$1 and event='page_view' and ${inRange("created_at")}`, P
+  )).rows[0].s;
+
+  kpis.aov = kpis.orders ? +(kpis.revenue / kpis.orders).toFixed(2) : 0;
+  kpis.sessions = sessions;
+  kpis.pageviews = evCount("page_view");
+  kpis.conversion_rate = sessions ? +((kpis.orders / sessions) * 100).toFixed(2) : 0;
+
+  const funnel = {
+    view_item: evCount("view_item"),
+    add_to_cart: evCount("add_to_cart"),
+    begin_checkout: evCount("begin_checkout"),
+    purchase: kpis.orders,
+  };
+
+  // daily series: orders/revenue + sessions, merged by date
+  const oSeries = (await query(
+    `select o.created_at::date as d, coalesce(sum(o.total),0) as revenue, count(*)::int as orders
+       from orders o where o.enrollment_id=$1 and ${inRange("o.created_at")}
+      group by 1`, P
+  )).rows;
+  const sSeries = (await query(
+    `select created_at::date as d, count(distinct session_id)::int as sessions
+       from store_events where enrollment_id=$1 and event='page_view' and ${inRange("created_at")}
+      group by 1`, P
+  )).rows;
+  const byDay = new Map();
+  for (const r of oSeries) byDay.set(String(r.d).slice(0, 10), { d: String(r.d).slice(0, 10), revenue: Number(r.revenue), orders: r.orders, sessions: 0 });
+  for (const r of sSeries) {
+    const k = String(r.d).slice(0, 10);
+    byDay.set(k, { ...(byDay.get(k) || { d: k, revenue: 0, orders: 0 }), sessions: r.sessions });
+  }
+  const series = [...byDay.values()].sort((a, b) => a.d.localeCompare(b.d));
+
+  const status_breakdown = (await query(
+    `select status, count(*)::int as count, coalesce(sum(total),0) as total
+       from orders where enrollment_id=$1 and ${inRange("created_at")} group by status`, P
+  )).rows;
+
+  const top_products = (await query(
+    `select oi.product_id, oi.db_name, max(oi.product_name) as name,
+            sum(oi.qty)::int as units, coalesce(sum(oi.line_total),0) as revenue,
+            count(distinct oi.order_id)::int as orders
+       from order_items oi join orders o on o.id=oi.order_id
+      where o.enrollment_id=$1 and o.status <> 'cancelled' and ${inRange("o.created_at")}
+      group by oi.product_id, oi.db_name
+      order by revenue desc limit 15`, P
+  )).rows;
+
+  res.json({ range: { from, to }, kpis, funnel, series, status_breakdown, top_products });
 }));
 
 // PUT /portal/hosted-sites/:id/custom-domain  { domain: 'aquawatch.com' | '' }

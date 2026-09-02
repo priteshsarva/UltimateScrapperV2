@@ -20,6 +20,18 @@ export function signCustomerToken(customer) {
   );
 }
 
+// Preview unlock token — proves the holder entered the store's preview password,
+// so a not-yet-live store can be viewed. Scoped to one enrollment.
+export function signPreviewToken(enrollmentId) {
+  return jwt.sign({ preview: true, enrollmentId }, CUSTOMER_JWT_SECRET, { expiresIn: "7d" });
+}
+export function verifyPreviewToken(token, enrollmentId) {
+  try {
+    const p = jwt.verify(String(token || ""), CUSTOMER_JWT_SECRET);
+    return p.preview === true && p.enrollmentId === enrollmentId;
+  } catch { return false; }
+}
+
 // Attaches req.customer if a valid token for THIS store is present; never blocks
 // (guest checkout is allowed). Must run after resolveStore. Routes that require
 // login chain requireCustomer after this.

@@ -58,7 +58,9 @@ create table if not exists enrollments (
   source_id       text references sources(id),
   enrollment_key  text unique not null,             -- the spp_live_... token the plugin sends
   status          text not null default 'pending'
-                    check (status in ('pending','approved','active','paused','expired','rejected')),
+                    -- 'draft' = hosted site still being set up by the owner; flips to
+                    -- 'pending' (admin queue) only when they Submit for review / Go live.
+                    check (status in ('draft','pending','approved','active','paused','expired','rejected')),
   categories      text[] not null default '{}',     -- selected category names -> sync-feed filter
   renewal_date    date,
   expiry_date     date,                              -- = activation/renewal + 1 month

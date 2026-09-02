@@ -185,7 +185,7 @@ app.use(cors({
     // vendor order-status change). Without it the browser blocks those calls at
     // preflight even though the server implements them — curl works, the UI doesn't.
     methods: 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    allowedHeaders: ["Content-Type", "Authorization", "X-Store-Host", "x-enrollment-key", "x-site-domain"]
+    allowedHeaders: ["Content-Type", "Authorization", "X-Store-Host", "x-enrollment-key", "x-site-domain", "X-Preview-Token"]
 }));
 
 app.use("/portal/scrape-requests", scrapeRequestRoutes);

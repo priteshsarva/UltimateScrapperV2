@@ -13,6 +13,7 @@
 //      names in the path — that was the hole that let an unverified domain
 //      serve an unrelated vendor.
 import { query } from "./db.js";
+import { verifyPreviewToken } from "./customerAuth.js";
 
 const PLATFORM_HOST = (process.env.PLATFORM_HOST || "").toLowerCase().replace(/^\.+|\.+$/g, "");
 
@@ -62,8 +63,20 @@ export async function resolveStore(req, res, next) {
   }
 
   if (!enr) return res.status(404).json({ error: "Store not found" });
-  if (enr.status !== "active")
-    return res.status(404).json({ error: "Store not available", status: enr.status });
   req.storeEnrollment = enr;
+
+  // A store is LIVE only when active. Non-live stores (draft/pending/…) are
+  // viewable in PREVIEW mode by anyone holding a valid preview token (issued by
+  // /preview-unlock after entering the store's shareable password).
+  req.storeIsLive = enr.status === "active";
+  req.storeUnlocked = req.storeIsLive || verifyPreviewToken(req.headers["x-preview-token"], enr.id);
+
+  // /config and /preview-unlock stay reachable while locked so the SPA can show a
+  // branded password gate and take the password. Everything else is gated.
+  const path = req.path || "";
+  const openWhileLocked = path.endsWith("/config") || path.endsWith("/preview-unlock");
+  if (!req.storeUnlocked && !openWhileLocked)
+    return res.status(401).json({ error: "preview_locked", preview_required: true, status: enr.status });
+
   next();
 }

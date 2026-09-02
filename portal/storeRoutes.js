@@ -13,6 +13,7 @@ import { query, pool } from "./db.js";
 import { resolveStore } from "./resolveStore.js";
 import {
   hashPassword, comparePassword, signCustomerToken, identifyCustomer, requireCustomer,
+  signPreviewToken,
 } from "./customerAuth.js";
 import { priceProduct, priceSqlExpr } from "./pricing.js";
 import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer.js";
@@ -342,7 +343,44 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     reviews: Array.isArray(site.reviews) ? site.reviews : [],
     categories,
     nav: site.nav && typeof site.nav === "object" ? site.nav : {},
+    // preview gating: live stores are public; non-live stores render only for a
+    // holder of a valid preview token, and show a "not live yet" watermark.
+    live: !!req.storeIsLive,
+    preview: !req.storeIsLive,
+    preview_required: !req.storeUnlocked,
   });
+}));
+
+// POST /:slug/preview-unlock { password } -> preview token if it matches the
+// store's shareable preview password. Lets a not-yet-live store be viewed.
+router.post("/:slug/preview-unlock", resolveStore, asyncH(async (req, res) => {
+  const enr = req.storeEnrollment;
+  if (req.storeIsLive) return res.json({ token: null, live: true }); // already public
+  const { password } = req.body || {};
+  const site = await loadSiteSettings(enr.id);
+  const expected = (site.preview_password || "").trim();
+  if (!expected || String(password || "").trim() !== expected)
+    return res.status(401).json({ error: "Wrong preview password" });
+  res.json({ token: signPreviewToken(enr.id) });
+}));
+
+// POST /:slug/track  { event, product_id?, db_name?, value?, session_id?, meta? }
+// First-party analytics beacon. Fire-and-forget from the storefront. Only live
+// stores are recorded — preview views would skew a vendor's numbers.
+const TRACK_EVENTS = new Set(["page_view", "view_item", "add_to_cart", "begin_checkout", "search"]);
+router.post("/:slug/track", resolveStore, asyncH(async (req, res) => {
+  if (!req.storeIsLive) return res.json({ ok: true, skipped: true });
+  const { event, product_id, db_name, value, session_id, meta } = req.body || {};
+  if (!TRACK_EVENTS.has(event)) return res.status(400).json({ error: "unknown event" });
+  await query(
+    `insert into store_events (enrollment_id, event, product_id, db_name, value, session_id, meta)
+     values ($1,$2,$3,$4,$5,$6,$7)`,
+    [req.storeEnrollment.id, event, product_id ? String(product_id).slice(0, 64) : null,
+     db_name ? String(db_name).slice(0, 64) : null, Number(value) || null,
+     session_id ? String(session_id).slice(0, 64) : null,
+     meta && typeof meta === "object" ? meta : {}]
+  );
+  res.json({ ok: true });
 }));
 
 // ============================================================ products
@@ -827,10 +865,24 @@ router.post("/:slug/auth/signup", resolveStore, asyncH(async (req, res) => {
 router.post("/:slug/auth/login", resolveStore, asyncH(async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: "email and password required" });
+  const em = String(email).toLowerCase().trim();
+
+  // THIS store's own owner signing in with their portal credentials? Send them
+  // to the portal instead of a customer session. Scoped to the enrollment's
+  // owner (user_id) — a different store's owner or the platform admin who does
+  // NOT own this store never gets bounced here; they're treated as a shopper.
+  // Same bcryptjs scheme as portal/auth.js, so this hash compare is valid.
+  const owner = (await query(
+    `select password_hash from users where id=$1 and lower(email)=$2`,
+    [req.storeEnrollment.user_id, em]
+  )).rows[0];
+  if (owner && owner.password_hash && (await comparePassword(password, owner.password_hash)))
+    return res.json({ redirect_to_portal: true });
+
   const { rows } = await query(
     `select id, enrollment_id, email, name, phone, password_hash from customers
       where enrollment_id=$1 and email=$2`,
-    [req.storeEnrollment.id, String(email).toLowerCase().trim()]
+    [req.storeEnrollment.id, em]
   );
   const customer = rows[0];
   // an unclaimed guest account (auto-created at checkout) has no password yet
