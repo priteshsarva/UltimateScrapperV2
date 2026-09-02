@@ -194,20 +194,22 @@ clientRouter.get("/hosted-analytics", asyncH(async (req, res) => {
   res.json({ totals, series, sites });
 }));
 
-// GET /portal/hosted-sites/:id/analytics?from=&to=  -> robust per-store report:
-// KPIs, funnel, daily series, status breakdown, top products. Orders drive money
-// (authoritative); store_events drive traffic/funnel (first-party, no dataLayer).
-clientRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
-  const id = req.params.id;
-  if (!(await ownedSite(id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+// Range: default last 30 days (inclusive); 'to' counts the whole end day.
+function analyticsRange(q) {
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to || "") ? q.to : new Date().toISOString().slice(0, 10);
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from || "") ? q.from : new Date(Date.now() - 29 * 864e5).toISOString().slice(0, 10);
+  return { from, to };
+}
 
-  // Range: default last 30 days (inclusive). 'to' counts the whole end day.
-  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || "") ? req.query.to : new Date().toISOString().slice(0, 10);
-  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || "")
-    ? req.query.from
-    : new Date(Date.now() - 29 * 864e5).toISOString().slice(0, 10);
-  const P = [id, from, to];
-  const inRange = (col) => `${col} >= $2::date and ${col} < ($3::date + 1)`;
+// Robust analytics for ONE store (enrollmentId set) or ALL hosted stores combined
+// (enrollmentId = null): KPIs, funnel, daily series, status breakdown, top
+// products. Orders drive money (authoritative); store_events drive traffic/funnel.
+async function computeSiteAnalytics(enrollmentId, from, to) {
+  const P = [from, to];
+  if (enrollmentId) P.push(enrollmentId); // $3
+  // scope a column to the one store, or to every hosted store
+  const scope = (col) => enrollmentId ? `${col} = $3` : `${col} in (select id from enrollments where type='hosted')`;
+  const inRange = (col) => `${col} >= $1::date and ${col} < ($2::date + 1)`;
 
   const kpis = (await query(
     `select coalesce(sum(o.total),0) as revenue,
@@ -215,19 +217,18 @@ clientRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
             count(*)::int as orders,
             count(*) filter (where o.status = 'cancelled')::int as cancelled,
             coalesce((select sum(oi.qty) from order_items oi join orders o2 on o2.id=oi.order_id
-                       where o2.enrollment_id=$1 and ${inRange("o2.created_at")}),0)::int as units
-       from orders o where o.enrollment_id=$1 and ${inRange("o.created_at")}`, P
+                       where ${scope("o2.enrollment_id")} and ${inRange("o2.created_at")}),0)::int as units
+       from orders o where ${scope("o.enrollment_id")} and ${inRange("o.created_at")}`, P
   )).rows[0];
 
   const ev = (await query(
-    `select event, count(*)::int as n, count(distinct session_id)::int as sessions
-       from store_events where enrollment_id=$1 and ${inRange("created_at")}
-      group by event`, P
+    `select event, count(*)::int as n from store_events
+      where ${scope("enrollment_id")} and ${inRange("created_at")} group by event`, P
   )).rows;
   const evCount = (e) => (ev.find((r) => r.event === e) || {}).n || 0;
   const sessions = (await query(
     `select count(distinct session_id)::int as s from store_events
-      where enrollment_id=$1 and event='page_view' and ${inRange("created_at")}`, P
+      where ${scope("enrollment_id")} and event='page_view' and ${inRange("created_at")}`, P
   )).rows[0].s;
 
   kpis.aov = kpis.orders ? +(kpis.revenue / kpis.orders).toFixed(2) : 0;
@@ -242,16 +243,13 @@ clientRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
     purchase: kpis.orders,
   };
 
-  // daily series: orders/revenue + sessions, merged by date
   const oSeries = (await query(
     `select o.created_at::date as d, coalesce(sum(o.total),0) as revenue, count(*)::int as orders
-       from orders o where o.enrollment_id=$1 and ${inRange("o.created_at")}
-      group by 1`, P
+       from orders o where ${scope("o.enrollment_id")} and ${inRange("o.created_at")} group by 1`, P
   )).rows;
   const sSeries = (await query(
-    `select created_at::date as d, count(distinct session_id)::int as sessions
-       from store_events where enrollment_id=$1 and event='page_view' and ${inRange("created_at")}
-      group by 1`, P
+    `select created_at::date as d, count(distinct session_id)::int as sessions from store_events
+      where ${scope("enrollment_id")} and event='page_view' and ${inRange("created_at")} group by 1`, P
   )).rows;
   const byDay = new Map();
   for (const r of oSeries) byDay.set(String(r.d).slice(0, 10), { d: String(r.d).slice(0, 10), revenue: Number(r.revenue), orders: r.orders, sessions: 0 });
@@ -263,7 +261,7 @@ clientRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
 
   const status_breakdown = (await query(
     `select status, count(*)::int as count, coalesce(sum(total),0) as total
-       from orders where enrollment_id=$1 and ${inRange("created_at")} group by status`, P
+       from orders where ${scope("enrollment_id")} and ${inRange("created_at")} group by status`, P
   )).rows;
 
   const top_products = (await query(
@@ -271,12 +269,18 @@ clientRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
             sum(oi.qty)::int as units, coalesce(sum(oi.line_total),0) as revenue,
             count(distinct oi.order_id)::int as orders
        from order_items oi join orders o on o.id=oi.order_id
-      where o.enrollment_id=$1 and o.status <> 'cancelled' and ${inRange("o.created_at")}
-      group by oi.product_id, oi.db_name
-      order by revenue desc limit 15`, P
+      where ${scope("o.enrollment_id")} and o.status <> 'cancelled' and ${inRange("o.created_at")}
+      group by oi.product_id, oi.db_name order by revenue desc limit 15`, P
   )).rows;
 
-  res.json({ range: { from, to }, kpis, funnel, series, status_breakdown, top_products });
+  return { range: { from, to }, kpis, funnel, series, status_breakdown, top_products };
+}
+
+// GET /portal/hosted-sites/:id/analytics?from=&to=  -> one store's report (owner).
+clientRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const { from, to } = analyticsRange(req.query);
+  res.json(await computeSiteAnalytics(req.params.id, from, to));
 }));
 
 // PUT /portal/hosted-sites/:id/custom-domain  { domain: 'aquawatch.com' | '' }
@@ -550,6 +554,32 @@ adminRouter.get("/hosted-sites", asyncH(async (req, res) => {
       order by e.created_at desc`
   );
   res.json({ sites: rows });
+}));
+
+// GET /portal/admin/analytics?from=&to=  -> combined report across ALL hosted
+// stores + a per-store breakdown table (admin overview of the whole platform).
+adminRouter.get("/analytics", asyncH(async (req, res) => {
+  const { from, to } = analyticsRange(req.query);
+  const combined = await computeSiteAnalytics(null, from, to); // null = every hosted store
+  const P = [from, to];
+  const inRange = (col) => `${col} >= $1::date and ${col} < ($2::date + 1)`;
+  const stores = (await query(
+    `select e.id, e.slug, e.status, coalesce(s.store_name, e.slug) as store_name,
+            coalesce((select sum(o.total) from orders o where o.enrollment_id=e.id and ${inRange("o.created_at")}),0) as revenue,
+            coalesce((select count(*) from orders o where o.enrollment_id=e.id and ${inRange("o.created_at")}),0)::int as orders,
+            coalesce((select count(distinct session_id) from store_events se where se.enrollment_id=e.id and se.event='page_view' and ${inRange("se.created_at")}),0)::int as sessions
+       from enrollments e left join site_settings s on s.enrollment_id=e.id
+      where e.type='hosted'
+      order by revenue desc`, P
+  )).rows;
+  res.json({ ...combined, stores });
+}));
+
+// GET /portal/admin/hosted-sites/:id/analytics -> one store's full report (admin,
+// any store — no ownership check, unlike the vendor route).
+adminRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
+  const { from, to } = analyticsRange(req.query);
+  res.json(await computeSiteAnalytics(req.params.id, from, to));
 }));
 
 // Shared token-verification so an admin OR the owning vendor can verify a
