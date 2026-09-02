@@ -32,6 +32,10 @@ const refreshing = new Set();
 const lastAttempt = new Map();
 const RETRY_COOLDOWN_MS = 60 * 1000;
 const MAX_INFLIGHT = Math.max(1, parseInt(process.env.REFRESH_MAX_INFLIGHT, 10) || 4);
+// A shopper opening a product page live-refreshes it when it's older than this.
+// Shorter than the plugin's bulk staleness (a single view is one product, capped
+// by MAX_INFLIGHT + the per-product cooldown). Default 1 hour.
+const STOREFRONT_STALE_MS = Math.max(60 * 1000, parseInt(process.env.STOREFRONT_STALE_MS, 10) || 60 * 60 * 1000);
 
 const router = Router();
 
@@ -150,6 +154,19 @@ export async function listSiteSubBrands(enrollmentId, dbName, primary) {
   const sub = new Map();
   for (const r of rows) { const info = await brandInfo(r.brand); if (info && info.secondary) sub.set(info.secondary, (sub.get(info.secondary) || 0) + Number(r.n)); }
   return [...sub].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// catName -> its ORIGINAL supplier category URL (catSlug), read from the scraped
+// CATEGORIES table for a db. Powers the "original link" in the category panel.
+export async function categoryOriginalUrls(dbName) {
+  const rows = await runReadonly(
+    dbName,
+    `SELECT catName, catSlug FROM CATEGORIES WHERE catSlug IS NOT NULL AND TRIM(catSlug) != ''`,
+    []
+  ).catch(() => []);
+  const m = new Map();
+  for (const r of rows) if (r.catName) m.set(String(r.catName), r.catSlug);
+  return m;
 }
 
 // rewrite a row's scraped catName to the vendor's canonical name, using the map
@@ -662,11 +679,13 @@ router.get("/:slug/menu", resolveStore, asyncH(async (req, res) => {
     ).catch(() => []);
 
     const bySub = new Map(); // canonical subcat -> Map(canonical brand -> count)
+    const mappedSub = new Set(); // sub-cats that came from the vendor's category map
     for (const r of rows) {
       const src = catSrc.find((s) => String(r.ff || "").includes(s.search_key));
       const canonCat = (src && src.catMap && src.catMap[r.catName]);
       if (!canonCat && !showUnmapped) continue;
       const subName = canonCat || r.catName;
+      if (canonCat) mappedSub.add(subName);
       if (!bySub.has(subName)) bySub.set(subName, new Map());
       if (r.brand && String(r.brand).trim()) {
         const brand = await canonicalBrand(r.brand);
@@ -683,7 +702,7 @@ router.get("/:slug/menu", resolveStore, asyncH(async (req, res) => {
         const bc = curatedForDb.includes(b.name.toLowerCase()) ? 0 : 1;
         return ac !== bc ? ac - bc : b.count - a.count;
       });
-      return { name, brands: brands.slice(0, 12).map((b) => b.name) };
+      return { name, mapped: mappedSub.has(name), brands: brands.slice(0, 12).map((b) => b.name) };
     }).sort((a, b) => a.name.localeCompare(b.name));
 
     menu.push({ category: db, label: labelOf(db), subcategories });
@@ -756,7 +775,10 @@ router.post("/:slug/products/:dbName/:id/refresh", resolveStore, asyncH(async (r
   if (!product || !rowBelongsToSources(product, catSources))
     return res.status(404).json({ error: "Not found" });
 
-  if (!isStale(product)) return res.json({ status: "fresh" });
+  // stale for a page view = older than 1h (vs the plugin's 3-day bulk window)
+  const ts = parseInt(product.productLastUpdated, 10);
+  const staleForView = Number.isFinite(ts) && Date.now() - ts >= STOREFRONT_STALE_MS;
+  if (!staleForView) return res.json({ status: "fresh" });
 
   const key = dbName + ":" + id;
   const recentlyTried = lastAttempt.has(key) && Date.now() - lastAttempt.get(key) < RETRY_COOLDOWN_MS;

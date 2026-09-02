@@ -14,7 +14,8 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
-import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, productPageUrl } from "./storeRoutes.js";
+import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOriginalUrls, productPageUrl } from "./storeRoutes.js";
+import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -316,6 +317,28 @@ clientRouter.get("/hosted-sites/:id/subbrands", asyncH(async (req, res) => {
   const brand = (req.query.brand || "").toString();
   if (!category || !brand) return res.json({ subbrands: [] });
   res.json({ subbrands: await listSiteSubBrands(req.params.id, category, brand) });
+}));
+
+// GET /portal/hosted-sites/:id/all-categories  -> this store's raw categories + current mapping
+clientRouter.get("/hosted-sites/:id/all-categories", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const cats = await listSiteRawCategories(req.params.id);
+  // attach each category's ORIGINAL supplier URL (from the scraped CATEGORIES table)
+  const urlMaps = {};
+  for (const db of [...new Set(cats.map((c) => c.db_name))]) urlMaps[db] = await categoryOriginalUrls(db);
+  for (const c of cats) c.url = (urlMaps[c.db_name] && urlMaps[c.db_name].get(c.name)) || null;
+  res.json({ categories: cats });
+}));
+
+// PUT /portal/hosted-sites/:id/category-map  { db_name, cat_name, canonical }  -> store-wide upsert
+clientRouter.put("/hosted-sites/:id/category-map", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const cat_name = (req.body?.cat_name || "").toString();
+  const db_name = (req.body?.db_name || "").toString() || null;
+  const canonical = (req.body?.canonical || "").toString().trim();
+  if (!cat_name) return res.status(400).json({ error: "cat_name required" });
+  await saveSiteCategoryMapping(req.params.id, db_name, cat_name, canonical);
+  res.json({ ok: true });
 }));
 
 // GET /portal/hosted-sites/presets  -> shipped homepage presets
