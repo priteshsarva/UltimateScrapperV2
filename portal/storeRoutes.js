@@ -351,6 +351,11 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     favicon_url: site.favicon_url || null,
     theme: site.theme || {},
     whatsapp: site.whatsapp || null,
+    // UPI collection — the storefront builds the pay QR/deep link from these.
+    // Any UPI handle works (PhonePe/GPay/Paytm are all just VPAs); blank = no
+    // UPI step, checkout falls back to WhatsApp-only.
+    upi_id: site.upi_id || null,
+    upi_name: site.upi_name || null,
     email: site.email || null,
     phone: site.phone || null,
     address: site.address || {},
