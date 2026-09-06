@@ -9,3 +9,6 @@
 # committing, so the .db alone is always complete.
 databases/*.db-wal
 databases/*.db-shm
+
+# Local-only secrets (R2, etc.) — overrides .env and is NEVER committed/auto-pushed
+/.env.local

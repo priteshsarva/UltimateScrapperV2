@@ -1,3 +1,4 @@
+import "./portal/loadenv.js";
 import { exec } from 'child_process';
 
 import express, { json } from "express";
