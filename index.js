@@ -61,6 +61,7 @@ import catalogueRoutes from "./portal/catalogueRoutes.js";
 import notificationRoutes from "./portal/notificationRoutes.js";
 import brandMapRoutes from "./portal/brandMapRoutes.js";
 import { clientRouter as hostedSiteRoutes, adminRouter as adminHostedSiteRoutes } from "./portal/hostedSiteRoutes.js";
+import { wholesaleClientRoutes, wholesaleAdminRoutes } from "./portal/wholesaleRoutes.js";
 
 
 // const PORT = process.env.PORT || 5000;
@@ -213,6 +214,8 @@ app.use("/portal", hostedSiteRoutes);                     // vendor: /portal/hos
 app.use("/portal", catalogueRoutes);                      // vendor: /portal/catalogue (research)
 app.use("/portal", notificationRoutes);                   // /portal/notifications
 app.use("/portal/admin", adminHostedSiteRoutes);          // admin: /portal/admin/hosted-sites, /orders
+app.use("/portal", wholesaleClientRoutes);                // vendor: /portal/wholesale/*, /portal/taxonomy
+app.use("/portal/admin", wholesaleAdminRoutes);           // admin: /portal/admin/wholesalers, /taxonomy
 
 startScheduler();
 sweepTmp();                         // clean leftovers from the last run on boot

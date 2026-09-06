@@ -62,7 +62,7 @@ export async function setSourceStatus(id, status) {
 export async function nextSourceToScrape() {
   const { rows } = await query(
     `select * from sources
-      where status='active'
+      where status='active' and method <> 'MANUAL'
       order by last_scraped_at asc nulls first, name asc
       limit 1`
   );
