@@ -4,7 +4,7 @@
 // user's browser there with no session. It verifies server-side and bounces to the app.
 import { Router } from "express";
 import { query } from "./db.js";
-import { requireAuth } from "./auth.js";
+import { requireAuth, requireAdmin } from "./auth.js";
 import { createOrder, checkStatus } from "./pay0.js";
 import { markInvoicePaid } from "./billing.js";
 import { sendPaymentReceivedEmail } from "./mailer.js";
@@ -81,6 +81,50 @@ router.get("/invoices/:id/verify", requireAuth, async (req, res) => {
   if (!owned) return res.status(404).json({ error: "Invoice not found" });
   try { res.json(await finalize(req.params.id)); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Client declares they've paid this invoice by UPI (manual). Records the UTR and
+// flags the invoice 'pending' so an admin can confirm it — does NOT mark it paid.
+router.post("/invoices/:id/upi-claim", requireAuth, async (req, res) => {
+  try {
+    const inv = (await query(`select * from invoices where id=$1 and user_id=$2`, [req.params.id, req.user.sub])).rows[0];
+    if (!inv) return res.status(404).json({ error: "Invoice not found" });
+    if (inv.status === "paid") return res.status(400).json({ error: "Already paid" });
+    const utr = (req.body && req.body.utr) ? String(req.body.utr).trim().slice(0, 64) : null;
+    await query(`update invoices set status='pending', gateway='upi', utr=coalesce($2, utr) where id=$1`, [inv.id, utr]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---------- admin: manual invoice reconciliation (UPI) ----------
+// List invoices (optionally by status) with who owes and for which shop.
+router.get("/admin/invoices", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const params = [];
+    let sql = `select i.*, e.domain, u.email as user_email, u.name as user_name
+                 from invoices i
+                 left join enrollments e on e.id = i.enrollment_id
+                 left join users u on u.id = i.user_id`;
+    if (status) { params.push(status); sql += ` where i.status = $${params.length}`; }
+    sql += ` order by i.created_at desc limit 500`;
+    res.json({ invoices: (await query(sql, params)).rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Confirm a UPI/manual payment: marks paid + activates/extends the shop + emails.
+router.post("/admin/invoices/:id/mark-paid", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const inv = (await query(`select * from invoices where id=$1`, [req.params.id])).rows[0];
+    if (!inv) return res.status(404).json({ error: "Invoice not found" });
+    if (inv.status === "paid") return res.json({ ok: true, already: true });
+    const utr = (req.body && req.body.utr) ? String(req.body.utr).trim().slice(0, 64) : inv.utr;
+    await markInvoicePaid(inv.id, utr);
+    const enr = inv.enrollment_id ? (await query(`select * from enrollments where id=$1`, [inv.enrollment_id])).rows[0] : null;
+    const user = (await query(`select id,email,name from users where id=$1`, [inv.user_id])).rows[0];
+    if (enr && user) sendPaymentReceivedEmail(user, enr, inv).catch(() => {});
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Pay0 redirects the browser here after payment; verify then bounce back to the app

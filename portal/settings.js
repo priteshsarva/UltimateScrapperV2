@@ -165,8 +165,34 @@ export async function setActiveProvider(id) {
   return getPaymentRegistryMasked();
 }
 
-// Non-secret view for the plugin / client — NEVER includes keys.
+// ---- Platform UPI (manual collection for our OWN billing to vendors) --------
+// Not a gateway — a UPI VPA vendors pay their plan invoice into, then send us
+// the screenshot. We confirm the invoice by hand. Stored in app_settings key
+// 'platform_upi', env fallback so it works before anything is saved.
+export async function getPlatformUpi() {
+  const s = await readRow("platform_upi");
+  return {
+    upi_id:   s.upi_id   || process.env.PLATFORM_UPI_ID       || "",
+    upi_name: s.upi_name || process.env.PLATFORM_UPI_NAME     || "Server Products",
+    whatsapp: s.whatsapp || process.env.PLATFORM_BILLING_WHATSAPP || "",
+  };
+}
+
+export async function savePlatformUpi(fields) {
+  const cur = await getPlatformUpi();
+  const next = {
+    upi_id:   fields.upi_id   != null ? String(fields.upi_id).trim()   : cur.upi_id,
+    upi_name: fields.upi_name != null ? String(fields.upi_name).trim() : cur.upi_name,
+    whatsapp: fields.whatsapp != null ? String(fields.whatsapp).trim() : cur.whatsapp,
+  };
+  await saveSettings("platform_upi", next);
+  return next;
+}
+
+// Non-secret view for the plugin / client — NEVER includes keys. Includes the
+// platform UPI so the client billing screen can offer "pay by UPI".
 export async function getPaymentPublic() {
   const a = await getActiveProvider();
-  return { enabled: a.enabled, provider: a.id, title: a.title, description: a.description };
+  const upi = await getPlatformUpi();
+  return { enabled: a.enabled, provider: a.id, title: a.title, description: a.description, upi };
 }
