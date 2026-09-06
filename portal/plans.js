@@ -1,8 +1,15 @@
 // Plan tiers — CRUD helpers. Plans are data the admin manages; shops reference one
-// and invoices are priced from it.
+// and invoices are priced from it. kind = retail | wholesale | both; features is a
+// bullet list shown on plan cards; limits gates listings (max_products, max_images,
+// allow_payout_routing).
 import { query } from "./db.js";
 
-const FIELDS = ["name", "price", "currency", "interval", "interval_count", "description", "active", "sort_order"];
+const FIELDS = ["name", "price", "currency", "interval", "interval_count", "description", "active", "sort_order", "kind"];
+
+// Normalize the array/json columns before they hit pg.
+const asFeatures = (v) => Array.isArray(v) ? v.map((s) => String(s).trim()).filter(Boolean)
+  : (typeof v === "string" ? v.split("\n").map((s) => s.trim()).filter(Boolean) : []);
+const asLimits = (v) => JSON.stringify(v && typeof v === "object" ? v : {});
 
 export async function listPlans({ activeOnly = false } = {}) {
   const where = activeOnly ? "where active = true" : "";
@@ -17,13 +24,14 @@ export async function createPlan(p) {
   const {
     name, price,
     currency = "INR", interval = "month", interval_count = 1,
-    description = null, active = true, sort_order = 0,
+    description = null, active = true, sort_order = 0, kind = "retail",
+    features, limits,
   } = p;
   return (await query(
-    `insert into plans (name, price, currency, interval, interval_count, description, active, sort_order)
-     values ($1,$2,$3,$4,$5,$6,$7,$8)
+    `insert into plans (name, price, currency, interval, interval_count, description, active, sort_order, kind, features, limits)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      returning *`,
-    [name, price, currency, interval, interval_count, description, active, sort_order]
+    [name, price, currency, interval, interval_count, description, active, sort_order, kind, asFeatures(features), asLimits(limits)]
   )).rows[0];
 }
 
@@ -34,6 +42,8 @@ export async function updatePlan(id, patch) {
   for (const k of FIELDS) {
     if (patch[k] !== undefined) { sets.push(`${k} = $${i++}`); vals.push(patch[k]); }
   }
+  if (patch.features !== undefined) { sets.push(`features = $${i++}`); vals.push(asFeatures(patch.features)); }
+  if (patch.limits !== undefined) { sets.push(`limits = $${i++}`); vals.push(asLimits(patch.limits)); }
   if (!sets.length) return getPlan(id);
   vals.push(id);
   return (await query(`update plans set ${sets.join(", ")} where id = $${i} returning *`, vals)).rows[0] || null;
