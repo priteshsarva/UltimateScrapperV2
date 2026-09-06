@@ -1032,12 +1032,31 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
       return res.status(409).json({ error: `"${row.productName}" is not available to order right now.` });
 
     const images = parseImages(row);
+    // Wholesale items carry their supplier + wholesale cost so payment-verify can
+    // split the money (wholesaler gets cost, retailer gets the margin). A full
+    // snapshot is frozen onto the order so later price/supplier changes never
+    // rewrite history.
+    const isWholesale = dbName === "wholesale";
+    let sku = null; if (isWholesale) { try { sku = JSON.parse(row.wholesaleMeta || "{}").sku || null; } catch { /* ignore */ } }
+    const costPrice = isWholesale ? (Number(row.productOriginalPrice) || null) : null;
     lineItems.push({
       product_id: String(productId), db_name: dbName, product_name: row.productName,
       size: it.size ? String(it.size).slice(0, 40) : null,
       image_url: row.featuredimg || images[0] || null,
       page_url: productPageUrl(enr, dbName, productId), // storefront product page (not the supplier URL)
       unit_price: priced.price, qty, line_total: round2(priced.price * qty),
+      supplier_enrollment_id: isWholesale ? (row.ownerEnrollmentId || null) : null,
+      cost_price: costPrice,
+      snapshot: {
+        product_id: String(productId), db_name: dbName, name: row.productName, brand: row.productBrand || null,
+        size: it.size || null, primary_cat: row.primaryCat || null, sub: row.catName || null, sku,
+        mrp: row.productPriceWithoutDiscount || null, images, thumbnail: row.featuredimg || images[0] || null,
+        sell_price: priced.price, cost_price: costPrice, qty, line_total: round2(priced.price * qty),
+        margin: costPrice != null ? round2((priced.price - costPrice) * qty) : null,
+        supplier_enrollment_id: isWholesale ? (row.ownerEnrollmentId || null) : null,
+        supplier_source: row.productFetchedFrom || null, source_url: row.productUrl || null,
+        description: row.productShortDescription || null,
+      },
     });
   }
   if (!lineItems.length) return res.status(400).json({ error: "No valid items to order" });
@@ -1089,9 +1108,10 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
 
     for (const li of lineItems) {
       await client.query(
-        `insert into order_items (order_id, product_id, db_name, product_name, size, image_url, unit_price, qty, line_total)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [order.id, li.product_id, li.db_name, li.product_name, li.size, li.image_url, li.unit_price, li.qty, li.line_total]
+        `insert into order_items (order_id, product_id, db_name, product_name, size, image_url, unit_price, qty, line_total, supplier_enrollment_id, cost_price, snapshot)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [order.id, li.product_id, li.db_name, li.product_name, li.size, li.image_url, li.unit_price, li.qty, li.line_total,
+         li.supplier_enrollment_id || null, li.cost_price, JSON.stringify(li.snapshot || {})]
       );
     }
     await client.query("COMMIT");

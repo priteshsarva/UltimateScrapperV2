@@ -7,6 +7,7 @@ import { query } from "./db.js";
 import { generateInvoiceForEnrollment } from "./billing.js";
 import { sendReminderEmail, sendMail } from "./mailer.js";
 import { notify } from "./notifications.js";
+import { reverifyListingsTick, purgeShipmentPhotosTick } from "./wholesaleCron.js";
 import { runCatalogueScan } from "./catalogueScan.js";
 
 // Hosted storefronts get a 5-day grace after their plan expires: the store stays
@@ -135,7 +136,12 @@ export function startScheduler() {
       cron.default.schedule("30 7 * * *", () => {
         runCatalogueScan().then((r) => console.log("[scan] daily", r)).catch((e) => console.error("[scan] daily:", e.message));
       });
-      console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30");
+      // wholesale: re-verify overdue listings + purge expired shipment photos
+      cron.default.schedule("15 8 * * *", () => {
+        reverifyListingsTick().then((r) => console.log("[wholesale] reverify", r)).catch((e) => console.error("[wholesale] reverify:", e.message));
+        purgeShipmentPhotosTick().then((r) => console.log("[wholesale] purge", r)).catch((e) => console.error("[wholesale] purge:", e.message));
+      });
+      console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30; wholesale maintenance at 08:15");
     })
     .catch(() => console.warn("[billing] node-cron not installed — trigger billingTick via the admin endpoint or system cron"));
 }
