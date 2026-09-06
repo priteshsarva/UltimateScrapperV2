@@ -63,6 +63,31 @@ clientRouter.post("/wholesale/apply", asyncH(async (req, res) => {
   res.json({ wholesaler: w });
 }));
 
+// Orders that include THIS wholesaler's products (their sales across all
+// retailers). Each carries the wholesaler's own line items + their share.
+clientRouter.get("/wholesale/orders", asyncH(async (req, res) => {
+  const w = (await query(`select enrollment_id from wholesalers where user_id=$1`, [req.user.sub])).rows[0];
+  if (!w) return res.status(403).json({ error: "You don't have a wholesaler account." });
+  const orders = (await query(
+    `select o.id, o.order_no, o.status, o.payment_status, o.created_at, o.address, o.buyer_name,
+            coalesce(s.store_name, e.slug) as store_name, e.slug as store_slug
+       from orders o
+       join enrollments e on e.id = o.enrollment_id
+       left join site_settings s on s.enrollment_id = e.id
+      where exists (select 1 from order_items oi where oi.order_id=o.id and oi.supplier_enrollment_id=$1)
+      order by o.created_at desc limit 200`,
+    [w.enrollment_id]
+  )).rows;
+  for (const o of orders) {
+    o.items = (await query(
+      `select product_name, size, qty, cost_price, snapshot from order_items where order_id=$1 and supplier_enrollment_id=$2`,
+      [o.id, w.enrollment_id]
+    )).rows;
+    o.my_total = o.items.reduce((s, it) => s + Number(it.cost_price || 0) * Number(it.qty), 0);
+  }
+  res.json({ orders });
+}));
+
 // Taxonomy the wholesaler can pick from: active subs for a primary category,
 // plus their own still-proposed ones. No free text on the storefront side.
 clientRouter.get("/taxonomy", asyncH(async (req, res) => {
