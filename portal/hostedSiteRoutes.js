@@ -14,7 +14,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
-import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOriginalUrls, productPageUrl } from "./storeRoutes.js";
+import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOriginalUrls, productPageUrl, productSourceUrls } from "./storeRoutes.js";
 import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
 import { sendMail } from "./mailer.js";
 
@@ -346,7 +346,7 @@ clientRouter.get("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   res.json({ settings: rows[0] || {} });
 }));
 
-const SETTINGS_FIELDS = ["store_name", "logo_url", "favicon_url", "theme", "whatsapp", "email", "phone",
+const SETTINGS_FIELDS = ["store_name", "logo_url", "favicon_url", "theme", "whatsapp", "upi_id", "upi_name", "email", "phone",
   "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics", "nav", "reviews", "preset"];
 const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics", "nav", "reviews"]);
 
@@ -516,8 +516,13 @@ clientRouter.get("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) =>
   )).rows[0];
   if (!order) return res.status(404).json({ error: "Order not found" });
   const slug = (await query(`select slug from enrollments where id=$1`, [req.params.id])).rows[0]?.slug;
-  const items = (await query(`select * from order_items where order_id=$1`, [order.id])).rows
-    .map((it) => ({ ...it, page_url: slug ? productPageUrl({ slug }, it.db_name, it.product_id) : null }));
+  const rawItems = (await query(`select * from order_items where order_id=$1`, [order.id])).rows;
+  const srcUrls = await productSourceUrls(rawItems);
+  const items = rawItems.map((it) => ({
+    ...it,
+    page_url: slug ? productPageUrl({ slug }, it.db_name, it.product_id) : null,
+    product_url: srcUrls[`${it.db_name}:${it.product_id}`] || null, // original supplier URL
+  }));
   res.json({ order, items });
 }));
 
@@ -684,7 +689,9 @@ adminRouter.get("/orders/:id", asyncH(async (req, res) => {
     [req.params.id]
   )).rows[0];
   if (!order) return res.status(404).json({ error: "Order not found" });
-  const items = (await query(`select * from order_items where order_id=$1`, [order.id])).rows;
+  const rawItems = (await query(`select * from order_items where order_id=$1`, [order.id])).rows;
+  const srcUrls = await productSourceUrls(rawItems);
+  const items = rawItems.map((it) => ({ ...it, product_url: srcUrls[`${it.db_name}:${it.product_id}`] || null }));
   res.json({ order, items });
 }));
 

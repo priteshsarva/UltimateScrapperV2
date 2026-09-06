@@ -6,6 +6,7 @@ import { requireAuth, requireAdmin } from "./auth.js";
 import {
   getSmtpConfig, getSmtpConfigMasked, saveSettings,
   getPaymentRegistryMasked, savePaymentProvider, setActiveProvider, getPaymentPublic,
+  getPlatformUpi, savePlatformUpi,
 } from "./settings.js";
 import { sendMail } from "./mailer.js";
 
@@ -69,6 +70,16 @@ adminRouter.put("/payment/provider/:id", async (req, res) => {
 adminRouter.put("/payment/active", async (req, res) => {
   try { res.json({ ok: true, payment: await setActiveProvider((req.body && req.body.id) || "") }); }
   catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Platform UPI (our own manual collection from vendors). Not a gateway.
+adminRouter.get("/platform-upi", async (_req, res) => {
+  try { res.json({ upi: await getPlatformUpi() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+adminRouter.put("/platform-upi", async (req, res) => {
+  try { res.json({ ok: true, upi: await savePlatformUpi(req.body || {}) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ---------- public (non-secret) ----------

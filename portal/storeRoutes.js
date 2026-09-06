@@ -60,6 +60,28 @@ function runReadonly(dbName, sql, params) {
   });
 }
 
+// For a set of order items, look up each product's ORIGINAL supplier URL
+// (PRODUCTS.productUrl in the category SQLite) → { "<db_name>:<product_id>": url }.
+// Lets the order pages link to the real source product, not just the store page.
+export async function productSourceUrls(items) {
+  const byDb = new Map();
+  for (const it of items || []) {
+    if (!it || !it.db_name || it.product_id == null) continue;
+    if (!byDb.has(it.db_name)) byDb.set(it.db_name, new Set());
+    byDb.get(it.db_name).add(String(it.product_id));
+  }
+  const out = {};
+  for (const [dbName, idSet] of byDb) {
+    const ids = [...idSet];
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = await runReadonly(
+      dbName, `SELECT productId, productUrl FROM PRODUCTS WHERE productId IN (${placeholders})`, ids
+    ).catch(() => []);
+    for (const r of rows) out[`${dbName}:${r.productId}`] = r.productUrl || null;
+  }
+  return out;
+}
+
 async function loadSiteSettings(enrollmentId) {
   const { rows } = await query(`select * from site_settings where enrollment_id=$1`, [enrollmentId]);
   return rows[0] || {};
@@ -329,6 +351,11 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     favicon_url: site.favicon_url || null,
     theme: site.theme || {},
     whatsapp: site.whatsapp || null,
+    // UPI collection — the storefront builds the pay QR/deep link from these.
+    // Any UPI handle works (PhonePe/GPay/Paytm are all just VPAs); blank = no
+    // UPI step, checkout falls back to WhatsApp-only.
+    upi_id: site.upi_id || null,
+    upi_name: site.upi_name || null,
     email: site.email || null,
     phone: site.phone || null,
     address: site.address || {},
