@@ -62,6 +62,7 @@ import notificationRoutes from "./portal/notificationRoutes.js";
 import brandMapRoutes from "./portal/brandMapRoutes.js";
 import { clientRouter as hostedSiteRoutes, adminRouter as adminHostedSiteRoutes } from "./portal/hostedSiteRoutes.js";
 import { wholesaleClientRoutes, wholesaleAdminRoutes } from "./portal/wholesaleRoutes.js";
+import { wholesaleProductClientRoutes, wholesaleProductAdminRoutes } from "./portal/wholesaleProductRoutes.js";
 
 
 // const PORT = process.env.PORT || 5000;
@@ -216,6 +217,8 @@ app.use("/portal", notificationRoutes);                   // /portal/notificatio
 app.use("/portal/admin", adminHostedSiteRoutes);          // admin: /portal/admin/hosted-sites, /orders
 app.use("/portal", wholesaleClientRoutes);                // vendor: /portal/wholesale/*, /portal/taxonomy
 app.use("/portal/admin", wholesaleAdminRoutes);           // admin: /portal/admin/wholesalers, /taxonomy
+app.use("/portal", wholesaleProductClientRoutes);         // vendor: /portal/wholesale/products
+app.use("/portal/admin", wholesaleProductAdminRoutes);    // admin: /portal/admin/wholesale-products
 
 startScheduler();
 sweepTmp();                         // clean leftovers from the last run on boot
