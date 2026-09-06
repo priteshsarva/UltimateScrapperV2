@@ -6,7 +6,7 @@ import { requireAuth, requireAdmin } from "./auth.js";
 import {
   getSmtpConfig, getSmtpConfigMasked, saveSettings,
   getPaymentRegistryMasked, savePaymentProvider, setActiveProvider, getPaymentPublic,
-  getPlatformUpi, savePlatformUpi,
+  getPlatformUpi, savePlatformUpi, getPlatformConfig, savePlatformConfig,
 } from "./settings.js";
 import { sendMail } from "./mailer.js";
 
@@ -79,6 +79,16 @@ adminRouter.get("/platform-upi", async (_req, res) => {
 });
 adminRouter.put("/platform-upi", async (req, res) => {
   try { res.json({ ok: true, upi: await savePlatformUpi(req.body || {}) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Platform economics: fees, listing re-verify cadence, payout terms.
+adminRouter.get("/platform-config", async (_req, res) => {
+  try { res.json({ config: await getPlatformConfig() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+adminRouter.put("/platform-config", async (req, res) => {
+  try { res.json({ ok: true, config: await savePlatformConfig(req.body || {}) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 

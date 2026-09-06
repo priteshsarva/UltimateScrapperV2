@@ -65,6 +65,7 @@ import { clientRouter as hostedSiteRoutes, adminRouter as adminHostedSiteRoutes 
 import { wholesaleClientRoutes, wholesaleAdminRoutes } from "./portal/wholesaleRoutes.js";
 import { wholesaleProductClientRoutes, wholesaleProductAdminRoutes } from "./portal/wholesaleProductRoutes.js";
 import uploadRoutes from "./portal/uploadRoutes.js";
+import { walletClientRoutes, walletAdminRoutes } from "./portal/walletRoutes.js";
 
 
 // const PORT = process.env.PORT || 5000;
@@ -222,6 +223,8 @@ app.use("/portal/admin", wholesaleAdminRoutes);           // admin: /portal/admi
 app.use("/portal", wholesaleProductClientRoutes);         // vendor: /portal/wholesale/products
 app.use("/portal/admin", wholesaleProductAdminRoutes);    // admin: /portal/admin/wholesale-products
 app.use("/portal", uploadRoutes);                        // R2 uploads: /portal/wholesale/upload, /portal/upload/status
+app.use("/portal", walletClientRoutes);                  // vendor: /portal/wallet, payout
+app.use("/portal/admin", walletAdminRoutes);             // admin: /portal/admin/payouts
 
 startScheduler();
 sweepTmp();                         // clean leftovers from the last run on boot
