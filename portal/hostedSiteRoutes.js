@@ -346,7 +346,7 @@ clientRouter.get("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   res.json({ settings: rows[0] || {} });
 }));
 
-const SETTINGS_FIELDS = ["store_name", "logo_url", "favicon_url", "theme", "whatsapp", "upi_id", "upi_name", "email", "phone",
+const SETTINGS_FIELDS = ["store_name", "logo_url", "favicon_url", "theme", "whatsapp", "upi_id", "upi_name", "payment_position", "email", "phone",
   "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics", "nav", "reviews", "preset"];
 const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics", "nav", "reviews"]);
 

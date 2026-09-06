@@ -8,3 +8,9 @@
 alter table site_settings
   add column if not exists upi_id   text,   -- vendor's UPI VPA — any app (x@ptyes / x@okhdfcbank / x@paytm / x@ybl …)
   add column if not exists upi_name text;   -- payee name shown in the customer's UPI app (blank = store name)
+
+-- When the UPI pay popup appears at checkout: 'after' the order is placed
+-- (default) or 'before' the buyer enters their delivery address.
+alter table site_settings
+  add column if not exists payment_position text not null default 'after'
+    check (payment_position in ('before','after'));

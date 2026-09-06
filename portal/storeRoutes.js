@@ -356,6 +356,8 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     // UPI step, checkout falls back to WhatsApp-only.
     upi_id: site.upi_id || null,
     upi_name: site.upi_name || null,
+    payment_position: site.payment_position || "after", // 'after' | 'before' address
+
     email: site.email || null,
     phone: site.phone || null,
     address: site.address || {},
