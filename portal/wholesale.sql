@@ -125,3 +125,8 @@ alter table order_items
 
 -- Platform-wide settings (fee_pct, gateway_fee_pct, listing_reverify_days,
 -- payout_terms_text) live in app_settings key 'platform' via settings.js.
+
+-- Fulfilment: allow the wholesaler to ship straight to the end customer.
+alter table shipments drop constraint if exists shipments_leg_check;
+alter table shipments add constraint shipments_leg_check
+  check (leg in ('wholesaler_to_retailer','retailer_to_customer','wholesaler_to_customer'));

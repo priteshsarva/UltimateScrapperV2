@@ -134,8 +134,13 @@ clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at,
             e.custom_domain, e.custom_domain_verified_at, e.plan_id,
+            e.payout_mode, e.fulfilment_mode,
+            (p.limits->>'allow_payout_routing')::boolean as allow_payout_routing,
+            (exists (select 1 from enrollment_sources es where es.enrollment_id=e.id and es.source_id like 'ws_%')) as has_wholesale,
             s.store_name, s.logo_url, s.preview_password
-       from enrollments e left join site_settings s on s.enrollment_id = e.id
+       from enrollments e
+       left join site_settings s on s.enrollment_id = e.id
+       left join plans p on p.id = e.plan_id
       where e.user_id=$1 and e.type='hosted'
       order by e.created_at desc`,
     [req.user.sub]
@@ -556,7 +561,8 @@ adminRouter.use(requireAuth, requireAdmin);
 adminRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at, u.email as owner_email,
-            e.custom_domain, e.custom_domain_verified_at,
+            e.custom_domain, e.custom_domain_verified_at, e.payout_mode, e.gateway_fee_pct,
+            (exists (select 1 from enrollment_sources es where es.enrollment_id=e.id and es.source_id like 'ws_%')) as has_wholesale,
             s.store_name, s.logo_url,
             (select count(*) from orders o where o.enrollment_id = e.id) as order_count
        from enrollments e

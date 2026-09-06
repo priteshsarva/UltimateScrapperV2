@@ -69,7 +69,7 @@ clientRouter.get("/wholesale/orders", asyncH(async (req, res) => {
   const w = (await query(`select enrollment_id from wholesalers where user_id=$1`, [req.user.sub])).rows[0];
   if (!w) return res.status(403).json({ error: "You don't have a wholesaler account." });
   const orders = (await query(
-    `select o.id, o.order_no, o.status, o.payment_status, o.created_at, o.address, o.buyer_name,
+    `select o.id, o.order_no, o.status, o.payment_status, o.fulfilment_mode, o.created_at, o.address, o.buyer_name, o.buyer_phone,
             coalesce(s.store_name, e.slug) as store_name, e.slug as store_slug
        from orders o
        join enrollments e on e.id = o.enrollment_id

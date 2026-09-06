@@ -54,7 +54,7 @@ async function canSubmitLeg(userId, order, leg) {
     const store = (await query(`select user_id from enrollments where id=$1`, [order.enrollment_id])).rows[0];
     return store && store.user_id === userId;
   }
-  // wholesaler_to_retailer: any supplier on the order
+  // wholesaler_to_retailer / wholesaler_to_customer: any supplier on the order
   return (await supplierUserIds(order.id)).includes(userId);
 }
 
@@ -69,6 +69,44 @@ clientRouter.post("/hosted-sites/:id/orders/:orderId/verify-payment", asyncH(asy
   const ord = (await query(`select id from orders where id=$1 and enrollment_id=$2`, [req.params.orderId, req.params.id])).rows[0];
   if (!ord) return res.status(404).json({ error: "Order not found" });
   res.json(await verifyOrderPayment(ord.id, { utr: req.body?.utr }));
+}));
+
+const ownsSite = async (siteId, userId) => (await query(`select 1 from enrollments where id=$1 and user_id=$2`, [siteId, userId])).rows.length > 0;
+
+// Retailer: global fulfilment default for the store (via_retailer | direct_to_customer).
+clientRouter.put("/hosted-sites/:id/fulfilment-mode", asyncH(async (req, res) => {
+  if (!(await ownsSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const mode = req.body?.fulfilment_mode;
+  if (!["via_retailer", "direct_to_customer"].includes(mode)) return res.status(400).json({ error: "bad fulfilment_mode" });
+  await query(`update enrollments set fulfilment_mode=$1 where id=$2`, [mode, req.params.id]);
+  res.json({ ok: true, fulfilment_mode: mode });
+}));
+
+// Retailer: per-order fulfilment override (only before anything has shipped).
+clientRouter.patch("/hosted-sites/:id/orders/:orderId/fulfilment", asyncH(async (req, res) => {
+  if (!(await ownsSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const mode = req.body?.fulfilment_mode;
+  if (!["via_retailer", "direct_to_customer"].includes(mode)) return res.status(400).json({ error: "bad fulfilment_mode" });
+  const shipped = (await query(`select 1 from shipments where order_id=$1`, [req.params.orderId])).rows.length;
+  if (shipped) return res.status(409).json({ error: "Can't change fulfilment after a shipment has been submitted." });
+  await query(`update orders set fulfilment_mode=$1 where id=$2 and enrollment_id=$3`, [mode, req.params.orderId, req.params.id]);
+  res.json({ ok: true, fulfilment_mode: mode });
+}));
+
+// Retailer: choose how buyers pay (direct to their UPI, or platform-held wallet).
+// Plan-gated (limits.allow_payout_routing) and forced to platform if the store
+// carries a wholesale source.
+clientRouter.put("/hosted-sites/:id/payout-mode", asyncH(async (req, res) => {
+  if (!(await ownsSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const mode = req.body?.payout_mode;
+  if (!["direct", "platform"].includes(mode)) return res.status(400).json({ error: "bad payout_mode" });
+  const enr = (await query(`select plan_id from enrollments where id=$1`, [req.params.id])).rows[0];
+  const plan = enr?.plan_id ? (await query(`select limits from plans where id=$1`, [enr.plan_id])).rows[0] : null;
+  if (!(plan && plan.limits && plan.limits.allow_payout_routing)) return res.status(403).json({ error: "Your plan doesn't include payment routing. Upgrade to enable platform-held payments." });
+  const hasWholesale = (await query(`select 1 from enrollment_sources where enrollment_id=$1 and source_id like 'ws_%'`, [req.params.id])).rows.length;
+  if (mode === "direct" && hasWholesale) return res.status(409).json({ error: "This store sells wholesale products, so payments must be platform-held to pay suppliers." });
+  await query(`update enrollments set payout_mode=$1 where id=$2`, [mode, req.params.id]);
+  res.json({ ok: true, payout_mode: mode });
 }));
 
 // Submit a shipment leg with parcel photos (2..10).
@@ -112,6 +150,18 @@ adminRouter.use(requireAuth, requireAdmin);
 adminRouter.post("/orders/:id/verify-payment", asyncH(async (req, res) => {
   res.json(await verifyOrderPayment(req.params.id, { utr: req.body?.utr }));
 }));
+
+// Admin: per-store gateway-fee override (null = use platform default) + payout mode.
+adminRouter.patch("/hosted-sites/:id/fees", asyncH(async (req, res) => {
+  const b = req.body || {};
+  const sets = [], params = [];
+  if ("gateway_fee_pct" in b) { params.push(b.gateway_fee_pct === "" || b.gateway_fee_pct == null ? null : Number(b.gateway_fee_pct)); sets.push(`gateway_fee_pct=$${params.length}`); }
+  if (b.payout_mode && ["direct", "platform"].includes(b.payout_mode)) { params.push(b.payout_mode); sets.push(`payout_mode=$${params.length}`); }
+  if (!sets.length) return res.status(400).json({ error: "nothing to update" });
+  params.push(req.params.id);
+  const row = (await query(`update enrollments set ${sets.join(", ")} where id=$${params.length} returning id, gateway_fee_pct, payout_mode`, params)).rows[0];
+  res.json({ ok: true, enrollment: row });
+}));
 adminRouter.post("/orders/:id/refund", asyncH(async (req, res) => {
   res.json(await refundOrder(req.params.id));
 }));
@@ -138,9 +188,14 @@ adminRouter.patch("/shipments/:id", asyncH(async (req, res) => {
   await query(`update shipments set status=$1, note=$2, reviewed_by=$3, reviewed_at=now() where id=$4`, [status, note || null, req.user.sub, s.id]);
 
   if (status === "approved") {
-    const userIds = s.leg === "retailer_to_customer"
-      ? (await query(`select user_id from enrollments e join orders o on o.enrollment_id=e.id where o.id=$1`, [s.order_id])).rows.map((r) => r.user_id)
-      : await supplierUserIds(s.order_id);
+    const storeOwner = (await query(`select user_id from enrollments e join orders o on o.enrollment_id=e.id where o.id=$1`, [s.order_id])).rows.map((r) => r.user_id);
+    const suppliers = await supplierUserIds(s.order_id);
+    // direct-to-customer: one leg fulfils the whole order, so release BOTH the
+    // wholesaler(s) and the retailer. retailer_to_customer releases the retailer;
+    // wholesaler_to_retailer releases the wholesaler(s).
+    const userIds = s.leg === "wholesaler_to_customer" ? [...new Set([...suppliers, ...storeOwner])]
+      : s.leg === "retailer_to_customer" ? storeOwner
+      : suppliers;
     const released = await releaseOutstanding(s.order_id, userIds);
     for (const e of released) notify({ user_id: e.user_id, type: "payout", title: `₹${Number(e.amount).toLocaleString("en-IN")} released to your wallet (shipment confirmed).` }).catch(() => {});
     return res.json({ ok: true, released });

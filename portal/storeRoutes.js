@@ -1099,8 +1099,8 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
     }
 
     const order = (await client.query(
-      `insert into orders (enrollment_id, customer_id, buyer_name, buyer_phone, buyer_email, address, subtotal, total, note)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `insert into orders (enrollment_id, customer_id, buyer_name, buyer_phone, buyer_email, address, subtotal, total, note, fulfilment_mode)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9, coalesce((select fulfilment_mode from enrollments where id=$1),'via_retailer'))
        returning id, order_no`,
       [enr.id, customerId, name, phone, email,
        JSON.stringify(shipTo), subtotal, subtotal, note || null]
