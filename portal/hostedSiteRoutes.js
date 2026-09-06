@@ -423,7 +423,14 @@ clientRouter.put("/hosted-sites/:id/sources", asyncH(async (req, res) => {
       [req.params.id, toRemove]
     );
   }
-  res.json({ ok: true, attached: valid });
+
+  // A store carrying a wholesale source MUST be platform-mode: the money has to
+  // be held by us so the wholesaler/retailer split can be released on shipment.
+  // Otherwise a direct-mode store would collect the whole amount and the supplier
+  // would never be paid.
+  const hasWholesale = valid.some((id) => String(id).startsWith("ws_"));
+  if (hasWholesale) await query(`update enrollments set payout_mode='platform' where id=$1`, [req.params.id]);
+  res.json({ ok: true, attached: valid, forced_platform: hasWholesale });
 }));
 
 // GET /portal/hosted-sites/:id/brands?category=  -> in-stock brands the vendor
