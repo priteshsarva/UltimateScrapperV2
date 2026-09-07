@@ -26,13 +26,15 @@ router.get("/users", async (req, res) => {
          count(distinct o.id)                                            as orders,
          coalesce(sum(o.total), 0)                                       as order_sales,
          coalesce(sum(i.amount) filter (where i.status = 'paid'), 0)     as paid_total,
-         count(distinct i.id) filter (where i.status in ('created','pending')) as unpaid_invoices
+         count(distinct i.id) filter (where i.status in ('created','pending')) as unpaid_invoices,
+         w.payout_threshold
        from users u
        left join enrollments e on e.user_id = u.id
        left join invoices   i on i.user_id = u.id
        left join orders     o on o.enrollment_id = e.id
+       left join wallets    w on w.user_id = u.id
       where u.role = 'client'
-      group by u.id
+      group by u.id, w.payout_threshold
       order by u.created_at desc`
     )).rows;
 

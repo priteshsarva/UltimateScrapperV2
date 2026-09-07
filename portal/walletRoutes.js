@@ -28,10 +28,13 @@ clientRouter.get("/wallet", asyncH(async (req, res) => {
   const pending = (await query(`select * from payout_requests where user_id=$1 and status in ('requested','processing') order by created_at desc`, [req.user.sub])).rows;
   const history = (await query(`select * from payout_requests where user_id=$1 order by created_at desc limit 50`, [req.user.sub])).rows;
 
-  // Ledger with the order number attached, and a per-order breakdown (held vs
-  // released vs paid-out) so the vendor sees exactly where each rupee came from.
+  // Ledger with the order attached, and a per-order breakdown (held vs released
+  // vs paid-out) so the vendor sees exactly where each rupee came from — plus the
+  // platform + gateway fee the platform kept on that order.
   const ledgerRows = (await query(
-    `select l.id, l.type, l.amount, l.balance_after, l.note, l.created_at, o.order_no, o.status as order_status
+    `select l.id, l.type, l.amount, l.balance_after, l.note, l.created_at,
+            o.order_no, o.status as order_status, o.total as order_total,
+            o.platform_fee, o.gateway_fee
        from wallet_ledger l left join orders o on o.id = l.order_id
       where l.user_id=$1 order by l.created_at desc limit 300`, [req.user.sub]
   )).rows;
@@ -39,7 +42,11 @@ clientRouter.get("/wallet", asyncH(async (req, res) => {
   for (const l of ledgerRows) {
     if (!l.order_no) continue;
     const k = l.order_no;
-    const g = byOrderMap.get(k) || { order_no: k, order_status: l.order_status, held: 0, released: 0, refunded: 0, at: l.created_at };
+    const g = byOrderMap.get(k) || {
+      order_no: k, order_status: l.order_status, order_total: Number(l.order_total || 0),
+      platform_fee: Number(l.platform_fee || 0), gateway_fee: Number(l.gateway_fee || 0),
+      held: 0, released: 0, refunded: 0, at: l.created_at,
+    };
     if (l.type === "hold") g.held += Number(l.amount);
     else if (l.type === "release") g.released += Number(l.amount);
     else if (l.type === "refund") g.refunded += Number(l.amount);
@@ -47,7 +54,12 @@ clientRouter.get("/wallet", asyncH(async (req, res) => {
   }
   const by_order = [...byOrderMap.values()].map((g) => ({ ...g, outstanding: Math.max(0, g.held - g.released - g.refunded) }));
 
-  res.json({ wallet, ledger: ledgerRows, by_order, terms_text: payout_terms_text, pending, payouts: history });
+  // Lifetime totals for the summary strip.
+  const paidOut = (await query(`select coalesce(sum(amount),0) v from payout_requests where user_id=$1 and status='paid'`, [req.user.sub])).rows[0].v;
+  const inPayout = (await query(`select coalesce(sum(amount),0) v from payout_requests where user_id=$1 and status in ('requested','processing')`, [req.user.sub])).rows[0].v;
+
+  res.json({ wallet, ledger: ledgerRows, by_order, terms_text: payout_terms_text, pending, payouts: history,
+    totals: { paid_out: Number(paidOut), in_payout: Number(inPayout) } });
 }));
 
 clientRouter.put("/wallet/payout-details", asyncH(async (req, res) => {
