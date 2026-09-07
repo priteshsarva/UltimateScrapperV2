@@ -194,7 +194,7 @@ export async function savePlatformUpi(fields) {
 // gateway_fee_pct = default payment-gateway fee (admin can override per store on
 // enrollments.gateway_fee_pct); listing_reverify_days = how often a wholesale
 // listing must be re-confirmed; payout_terms_text = shown on the wallet page.
-const PLATFORM_DEFAULTS = { fee_pct: 0, gateway_fee_pct: 0, listing_reverify_days: 30, payout_terms_text: "" };
+const PLATFORM_DEFAULTS = { fee_pct: 0, gateway_fee_pct: 0, listing_reverify_days: 30, payout_terms_text: "", payout_threshold: 1000 };
 export async function getPlatformConfig() {
   const s = await readRow("platform");
   return {
@@ -202,6 +202,7 @@ export async function getPlatformConfig() {
     gateway_fee_pct: s.gateway_fee_pct != null ? Number(s.gateway_fee_pct) : PLATFORM_DEFAULTS.gateway_fee_pct,
     listing_reverify_days: s.listing_reverify_days != null ? Number(s.listing_reverify_days) : PLATFORM_DEFAULTS.listing_reverify_days,
     payout_terms_text: s.payout_terms_text || PLATFORM_DEFAULTS.payout_terms_text,
+    payout_threshold: s.payout_threshold != null ? Number(s.payout_threshold) : PLATFORM_DEFAULTS.payout_threshold,
   };
 }
 export async function savePlatformConfig(patch) {
@@ -211,6 +212,7 @@ export async function savePlatformConfig(patch) {
   if (patch.gateway_fee_pct != null) next.gateway_fee_pct = Number(patch.gateway_fee_pct) || 0;
   if (patch.listing_reverify_days != null) next.listing_reverify_days = Number(patch.listing_reverify_days) || 30;
   if (patch.payout_terms_text != null) next.payout_terms_text = String(patch.payout_terms_text);
+  if (patch.payout_threshold != null) next.payout_threshold = Number(patch.payout_threshold) || 0;
   await saveSettings("platform", next);
   return next;
 }

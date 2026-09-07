@@ -8,10 +8,17 @@
 // so the history reconciles. Splits (multiple entries for one order) run inside
 // one transaction via withWallets().
 import { pool, query } from "./db.js";
+import { getPlatformConfig } from "./settings.js";
 
 export async function getWallet(userId) {
+  const existing = (await query(`select * from wallets where user_id=$1`, [userId])).rows[0];
+  if (existing) return existing;
+  // New wallet: seed the threshold from the platform default (admin can override
+  // it per-vendor later).
+  const { payout_threshold } = await getPlatformConfig();
   await query(
-    `insert into wallets (user_id) values ($1) on conflict (user_id) do nothing`, [userId]
+    `insert into wallets (user_id, payout_threshold) values ($1,$2) on conflict (user_id) do nothing`,
+    [userId, payout_threshold]
   );
   return (await query(`select * from wallets where user_id=$1`, [userId])).rows[0];
 }

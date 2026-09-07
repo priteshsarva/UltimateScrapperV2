@@ -33,10 +33,10 @@ clientRouter.get("/wallet", asyncH(async (req, res) => {
 clientRouter.put("/wallet/payout-details", asyncH(async (req, res) => {
   const b = req.body || {};
   await getWallet(req.user.sub);
+  // Threshold is admin-controlled (global default + per-vendor), never vendor-set.
   const sets = [], params = [];
   if (b.payout_upi != null) { params.push(String(b.payout_upi).trim()); sets.push(`payout_upi=$${params.length}`); }
   if (b.payout_bank != null) { params.push(JSON.stringify(b.payout_bank)); sets.push(`payout_bank=$${params.length}`); }
-  if (b.payout_threshold != null) { params.push(Number(b.payout_threshold) || 0); sets.push(`payout_threshold=$${params.length}`); }
   if (!sets.length) return res.status(400).json({ error: "nothing to update" });
   params.push(req.user.sub);
   await query(`update wallets set ${sets.join(", ")}, updated_at=now() where user_id=$${params.length}`, params);
@@ -76,6 +76,15 @@ clientRouter.post("/wallet/payout", asyncH(async (req, res) => {
 // ============================================================ admin
 const adminRouter = Router();
 adminRouter.use(requireAuth, requireAdmin);
+
+// Admin sets a vendor's payout threshold (per-vendor override of the global default).
+adminRouter.patch("/wallets/:userId", asyncH(async (req, res) => {
+  const t = Number(req.body?.payout_threshold);
+  if (!Number.isFinite(t) || t < 0) return res.status(400).json({ error: "bad threshold" });
+  await query(`insert into wallets (user_id, payout_threshold) values ($1,$2)
+               on conflict (user_id) do update set payout_threshold=$2, updated_at=now()`, [req.params.userId, t]);
+  res.json({ ok: true });
+}));
 
 adminRouter.get("/payouts", asyncH(async (req, res) => {
   const { status } = req.query;
