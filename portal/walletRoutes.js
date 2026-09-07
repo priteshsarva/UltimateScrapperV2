@@ -85,7 +85,9 @@ clientRouter.post("/wallet/accept-terms", asyncH(async (req, res) => {
 // an admin marks it paid (so a cancelled request restores nothing to restore).
 clientRouter.post("/wallet/payout", asyncH(async (req, res) => {
   const w = await getWallet(req.user.sub);
-  if (!w.terms_accepted_at) return res.status(400).json({ error: "Please accept the payout terms first." });
+  const { payout_terms_text } = await getPlatformConfig();
+  if (payout_terms_text && payout_terms_text.trim() && !w.terms_accepted_at)
+    return res.status(400).json({ error: "Please accept the payout terms first." });
   const open = (await query(`select 1 from payout_requests where user_id=$1 and status in ('requested','processing')`, [req.user.sub])).rows;
   if (open.length) return res.status(409).json({ error: "You already have a payout in progress." });
   const available = Number(w.available);
