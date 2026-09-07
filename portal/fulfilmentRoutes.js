@@ -166,6 +166,47 @@ adminRouter.post("/orders/:id/refund", asyncH(async (req, res) => {
   res.json(await refundOrder(req.params.id));
 }));
 
+// Verified orders that still need shipping — no APPROVED customer-facing shipment
+// yet. This is the admin's "pending shipments" list.
+adminRouter.get("/orders-pending-shipment", asyncH(async (req, res) => {
+  const rows = (await query(
+    `select o.id, o.order_no, o.total, o.status, o.fulfilment_mode, o.created_at, o.buyer_name,
+            coalesce(s.store_name, e.slug) as store_name,
+            exists(select 1 from shipments sh where sh.order_id=o.id and sh.status='submitted') as has_submitted
+       from orders o
+       join enrollments e on e.id = o.enrollment_id
+       left join site_settings s on s.enrollment_id = e.id
+      where o.payment_status='verified' and o.status <> 'completed' and o.status <> 'cancelled'
+        and not exists (
+          select 1 from shipments sh where sh.order_id=o.id and sh.status='approved'
+            and sh.leg in ('retailer_to_customer','wholesaler_to_customer'))
+      order by o.created_at desc limit 300`
+  )).rows;
+  res.json({ orders: rows });
+}));
+
+// Admin marks an order shipped without waiting for proof: create an approved
+// shipment for the customer-facing leg, RELEASE all outstanding holds (pay every
+// party), and complete the order.
+adminRouter.post("/orders/:id/mark-shipped", asyncH(async (req, res) => {
+  const order = (await query(`select * from orders where id=$1`, [req.params.id])).rows[0];
+  if (!order) return res.status(404).json({ error: "Order not found" });
+  if (order.payment_status !== "verified") return res.status(409).json({ error: "Verify the payment first." });
+  const leg = order.fulfilment_mode === "direct_to_customer" ? "wholesaler_to_customer" : "retailer_to_customer";
+  await query(
+    `insert into shipments (order_id, leg, shipped_by, photos, status, reviewed_by, reviewed_at, note, purge_after)
+     values ($1,$2,$3,'[]','approved',$3,now(),'Marked shipped by admin',$4)`,
+    [order.id, leg, req.user.sub, new Date(Date.now() + PURGE_DAYS * 86400 * 1000)]
+  );
+  // release every outstanding hold on the order (both wholesaler + retailer)
+  const storeOwner = (await query(`select user_id from enrollments where id=$1`, [order.enrollment_id])).rows.map((r) => r.user_id);
+  const suppliers = await supplierUserIds(order.id);
+  const released = await releaseOutstanding(order.id, [...new Set([...suppliers, ...storeOwner])]);
+  for (const e of released) notify({ user_id: e.user_id, type: "payout", title: `₹${Number(e.amount).toLocaleString("en-IN")} released to your wallet (order shipped).` }).catch(() => {});
+  await query(`update orders set status='completed', updated_at=now() where id=$1`, [order.id]);
+  res.json({ ok: true, released });
+}));
+
 adminRouter.get("/shipments", asyncH(async (req, res) => {
   const { status } = req.query;
   const params = [];
