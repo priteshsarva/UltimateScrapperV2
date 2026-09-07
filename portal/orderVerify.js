@@ -9,6 +9,7 @@ import { pool, query } from "./db.js";
 import { getPlatformConfig } from "./settings.js";
 import { withLedger } from "./wallet.js";
 import { wholesaleDb, wsRun, wsGet } from "./wholesaleDb.js";
+import { sendCustomerOrderEmail } from "./orderEmails.js";
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -66,6 +67,11 @@ export async function verifyOrderPayment(orderId, { utr = null } = {}) {
      where id=$1`,
     [orderId, utr, wholesalerTotal, retailerShare, platformFee, gatewayFee]
   );
+
+  // Payment confirmed → tell the customer their order is processing.
+  const brand = (await query(`select store_name from site_settings where enrollment_id=$1`, [order.enrollment_id])).rows[0]?.store_name;
+  sendCustomerOrderEmail({ to: order.buyer_email, brand, order: { ...order, payment_status: "verified", status: "processing" }, items, kind: "processing" });
+
   return { ok: true, split: { wholesalerTotal, retailerShare, platformFee, gatewayFee, held: store.payout_mode === "platform" } };
 }
 

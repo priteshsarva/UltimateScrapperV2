@@ -17,6 +17,7 @@ import { PRESETS } from "./storefrontPresets.js";
 import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOriginalUrls, productPageUrl, productSourceUrls } from "./storeRoutes.js";
 import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
 import { sendMail } from "./mailer.js";
+import { sendCustomerOrderEmail } from "./orderEmails.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -62,6 +63,17 @@ const asyncH = (fn) => (req, res) =>
 async function ownedSite(id, userId) {
   const r = (await query(`select id, user_id, slug from enrollments where id=$1 and type='hosted'`, [id])).rows[0];
   return r && r.user_id === userId ? r : null;
+}
+
+// Email the customer when an order's status changes (WooCommerce-style).
+async function emailOrderStatus(orderId, status) {
+  try {
+    const order = (await query(`select * from orders where id=$1`, [orderId])).rows[0];
+    if (!order || !order.buyer_email) return;
+    const items = (await query(`select product_name, size, qty, unit_price, line_total from order_items where order_id=$1`, [orderId])).rows;
+    const brand = (await query(`select store_name from site_settings where enrollment_id=$1`, [order.enrollment_id])).rows[0]?.store_name;
+    sendCustomerOrderEmail({ to: order.buyer_email, brand, order, items, kind: status });
+  } catch (e) { console.error("[order status email]", e.message); }
 }
 
 // ============================================================ vendor
@@ -550,6 +562,7 @@ clientRouter.patch("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) 
     [status, req.params.orderId, req.params.id]
   );
   if (!rowCount) return res.status(404).json({ error: "Order not found" });
+  emailOrderStatus(req.params.orderId, status);
   res.json({ order: rows[0] });
 }));
 
@@ -721,6 +734,7 @@ adminRouter.patch("/orders/:id/status", asyncH(async (req, res) => {
   if (!ORDER_STATUSES.has(status)) return res.status(400).json({ error: "Invalid status" });
   const row = (await query(`update orders set status=$1, updated_at=now() where id=$2 returning id, status`, [status, req.params.id])).rows[0];
   if (!row) return res.status(404).json({ error: "Order not found" });
+  emailOrderStatus(req.params.id, status);
   res.json({ order: row });
 }));
 

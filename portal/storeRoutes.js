@@ -17,6 +17,7 @@ import {
 } from "./customerAuth.js";
 import { priceProduct, priceSqlExpr } from "./pricing.js";
 import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer.js";
+import { sendCustomerOrderEmail, sendVendorOrderEmail } from "./orderEmails.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
 import { applyBrandToRows, rawBrandsFor, canonicalBrand, subBrandsFor, rawBrandsForSub, brandInfo, primaryBrandSet } from "./brandMap.js";
 import { getPlatformUpi } from "./settings.js";
@@ -1150,24 +1151,24 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
 
     const wa_url = buildWhatsAppUrl(site.whatsapp, order.order_no, lineItems, subtotal, { ...shipTo, phone }, site.store_name || enr.slug);
 
-    // Fire-and-forget order emails. Failures are logged inside sendMail;
-    // never let a mailer hiccup break the checkout response.
+    // Fire-and-forget order emails (WooCommerce-style). Never break checkout.
     const storeName = site.store_name || enr.slug;
-    const emailPayload = {
-      storeName, orderNo: order.order_no, total: subtotal,
-      items: lineItems, address: { ...shipTo, phone },
+    const emailOrder = {
+      order_no: order.order_no, total: subtotal, subtotal,
+      address: { ...shipTo, phone }, buyer_name: name, buyer_phone: phone, buyer_email: email,
+      payment_status: "unpaid",
     };
-    if (email) sendOrderConfirmationEmail({ ...emailPayload, buyerName: name, buyerEmail: email, whatsappUrl: wa_url }).catch(() => {});
+    if (email) sendCustomerOrderEmail({ to: email, brand: storeName, order: emailOrder, items: lineItems, kind: "placed" });
     (async () => {
       try {
-        // Order notification goes to the STOREFRONT's own email (site.email) when
-        // set; otherwise fall back to the client/vendor account email.
+        // Vendor/admin new-order alert → the storefront's own email (site.email)
+        // when set; otherwise the vendor account email.
         let notifyTo = site.email && String(site.email).trim();
         if (!notifyTo) {
           const vendor = (await query(`select u.email from users u join enrollments e on e.user_id=u.id where e.id=$1`, [enr.id])).rows[0];
           notifyTo = vendor?.email;
         }
-        if (notifyTo) sendOrderNotificationEmail({ ...emailPayload, vendorEmail: notifyTo, buyerName: name, buyerPhone: phone });
+        if (notifyTo) sendVendorOrderEmail({ to: notifyTo, brand: storeName, order: emailOrder, items: lineItems, storeName });
       } catch (e) { console.error("[order-email vendor] lookup failed:", e.message); }
     })();
 
