@@ -523,7 +523,7 @@ clientRouter.get("/hosted-sites/:id/orders", asyncH(async (req, res) => {
 clientRouter.get("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const order = (await query(
-    `select * from orders where id=$1 and enrollment_id=$2`,
+    `select o.*, e.payout_mode from orders o join enrollments e on e.id=o.enrollment_id where o.id=$1 and o.enrollment_id=$2`,
     [req.params.orderId, req.params.id]
   )).rows[0];
   if (!order) return res.status(404).json({ error: "Order not found" });
@@ -535,7 +535,8 @@ clientRouter.get("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) =>
     page_url: slug ? productPageUrl({ slug }, it.db_name, it.product_id) : null,
     product_url: srcUrls[`${it.db_name}:${it.product_id}`] || null, // original supplier URL
   }));
-  res.json({ order, items });
+  const shipments = (await query(`select id, leg, courier, tracking_no, photos, status, created_at, reviewed_at from shipments where order_id=$1 order by created_at`, [order.id])).rows;
+  res.json({ order, items, shipments });
 }));
 
 // PATCH /portal/hosted-sites/:id/orders/:orderId  { status }
@@ -680,7 +681,7 @@ adminRouter.get("/orders", asyncH(async (req, res) => {
   if (status) { params.push(status); where.push(`o.status=$${params.length}`); }
 
   const { rows } = await query(
-    `select o.*, e.slug, s.store_name
+    `select o.*, e.slug, e.payout_mode, s.store_name
        from orders o
        join enrollments e on e.id = o.enrollment_id
        left join site_settings s on s.enrollment_id = e.id
@@ -694,7 +695,7 @@ adminRouter.get("/orders", asyncH(async (req, res) => {
 // GET /portal/admin/orders/:id  -> one order + its items, any vendor (support/dispute lookups)
 adminRouter.get("/orders/:id", asyncH(async (req, res) => {
   const order = (await query(
-    `select o.*, e.slug, s.store_name
+    `select o.*, e.slug, e.payout_mode, s.store_name
        from orders o
        join enrollments e on e.id = o.enrollment_id
        left join site_settings s on s.enrollment_id = e.id
@@ -704,8 +705,23 @@ adminRouter.get("/orders/:id", asyncH(async (req, res) => {
   if (!order) return res.status(404).json({ error: "Order not found" });
   const rawItems = (await query(`select * from order_items where order_id=$1`, [order.id])).rows;
   const srcUrls = await productSourceUrls(rawItems);
-  const items = rawItems.map((it) => ({ ...it, product_url: srcUrls[`${it.db_name}:${it.product_id}`] || null }));
-  res.json({ order, items });
+  const slug = order.slug;
+  const items = rawItems.map((it) => ({
+    ...it,
+    page_url: slug ? productPageUrl({ slug }, it.db_name, it.product_id) : null,
+    product_url: srcUrls[`${it.db_name}:${it.product_id}`] || null,
+  }));
+  const shipments = (await query(`select id, leg, courier, tracking_no, photos, status, created_at, reviewed_at from shipments where order_id=$1 order by created_at`, [order.id])).rows;
+  res.json({ order, items, shipments });
+}));
+
+// PATCH /portal/admin/orders/:id/status  { status } -> any vendor's order
+adminRouter.patch("/orders/:id/status", asyncH(async (req, res) => {
+  const { status } = req.body || {};
+  if (!ORDER_STATUSES.has(status)) return res.status(400).json({ error: "Invalid status" });
+  const row = (await query(`update orders set status=$1, updated_at=now() where id=$2 returning id, status`, [status, req.params.id])).rows[0];
+  if (!row) return res.status(404).json({ error: "Order not found" });
+  res.json({ order: row });
 }));
 
 export { clientRouter, adminRouter };
