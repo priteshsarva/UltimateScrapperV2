@@ -1210,7 +1210,7 @@ router.post("/:slug/orders/:orderNo/claim", resolveStore, asyncH(async (req, res
 
 router.get("/:slug/me/orders", resolveStore, identifyCustomer, requireCustomer, asyncH(async (req, res) => {
   const { rows } = await query(
-    `select id, order_no, status, subtotal, total, created_at from orders
+    `select id, order_no, status, payment_status, subtotal, total, created_at from orders
       where enrollment_id=$1 and customer_id=$2 order by created_at desc`,
     [req.storeEnrollment.id, req.customer.sub]
   );
