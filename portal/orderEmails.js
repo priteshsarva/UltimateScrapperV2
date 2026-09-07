@@ -31,18 +31,19 @@ const CUSTOMER_COPY = {
   refunded: (no) => ["Your order was refunded", `Order ${no} was refunded`, "Your order has been refunded."],
 };
 
-export function buildCustomerOrderEmail(kind, { brand, order, items }) {
+export function buildCustomerOrderEmail(kind, { brand, order, items, contact = null }) {
   const [subjectBase, title, intro] = (CUSTOMER_COPY[kind] || CUSTOMER_COPY.placed)(order.order_no);
-  return { subject: `${subjectBase} — ${order.order_no}`, html: wrap({ title, brand, intro, bodyHtml: orderBody(order, items) }) };
+  return { subject: `${subjectBase} — ${order.order_no}`, html: wrap({ title, brand, intro, bodyHtml: orderBody(order, items), contact }) };
 }
 
-export function buildVendorOrderEmail({ brand, order, items, storeName }) {
+export function buildVendorOrderEmail({ brand, order, items, storeName, contact = null }) {
   return {
     subject: `New order ${order.order_no}${storeName ? " — " + storeName : ""}`,
     html: wrap({
       title: `New order ${order.order_no}`, brand,
       intro: `A new order was placed on ${storeName || "your store"}.`,
       bodyHtml: orderBody(order, items, { extra: `<p style="font-size:13px;color:#6b6b6b;margin-top:16px;">Buyer: ${order.buyer_name || ""} · ${order.buyer_phone || ""}${order.buyer_email ? " · " + order.buyer_email : ""}</p>` }),
+      contact,
     }),
   };
 }
@@ -64,14 +65,14 @@ export function buildPayoutEmail(kind, { brand, amount, utr, note }) {
 }
 
 // ---- senders (fire-and-forget) ----
-export function sendCustomerOrderEmail({ to, brand, order, items, kind }) {
+export function sendCustomerOrderEmail({ to, brand, order, items, kind, contact }) {
   if (!to) return;
-  const { subject, html } = buildCustomerOrderEmail(kind, { brand, order, items });
+  const { subject, html } = buildCustomerOrderEmail(kind, { brand, order, items, contact });
   sendMail({ to, subject, html }).catch((e) => console.error("[orderEmail]", e.message));
 }
-export function sendVendorOrderEmail({ to, brand, order, items, storeName }) {
+export function sendVendorOrderEmail({ to, brand, order, items, storeName, contact }) {
   if (!to) return;
-  const { subject, html } = buildVendorOrderEmail({ brand, order, items, storeName });
+  const { subject, html } = buildVendorOrderEmail({ brand, order, items, storeName, contact });
   sendMail({ to, subject, html }).catch((e) => console.error("[orderEmail]", e.message));
 }
 export function sendPayoutEmail({ to, brand, kind, amount, utr, note }) {

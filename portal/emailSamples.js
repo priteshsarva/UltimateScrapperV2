@@ -28,12 +28,14 @@ export const EMAIL_TYPES = [
   ["payout_cancelled", "Payout cancelled (vendor)"],
 ];
 
+const SAMPLE_CONTACT = { name: "AB Store", email: "hello@abstore.example", phone: "+91 90000 00303", whatsapp: "+91 90000 00303", address: { line1: "Shop 4, Vesu Main Rd", city: "Surat", state: "Gujarat", pincode: "394010" } };
+
 export function renderSampleEmail(type) {
-  if (type === "new_order") return buildVendorOrderEmail({ brand: BRAND, order: SAMPLE_ORDER, items: SAMPLE_ITEMS, storeName: "AB Store" });
+  if (type === "new_order") return buildVendorOrderEmail({ brand: "AB Store", order: SAMPLE_ORDER, items: SAMPLE_ITEMS, storeName: "AB Store", contact: SAMPLE_CONTACT });
   if (type?.startsWith("payout_")) {
     const kind = type.replace("payout_", "");
     return buildPayoutEmail(kind, { brand: BRAND, amount: 5400, utr: "AXIS123456789", note: "Bank details mismatch" });
   }
   const order = type === "placed" ? { ...SAMPLE_ORDER, payment_status: "unpaid" } : SAMPLE_ORDER;
-  return buildCustomerOrderEmail(type, { brand: BRAND, order, items: SAMPLE_ITEMS });
+  return buildCustomerOrderEmail(type, { brand: "AB Store", order, items: SAMPLE_ITEMS, contact: SAMPLE_CONTACT });
 }

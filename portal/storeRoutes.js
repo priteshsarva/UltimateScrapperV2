@@ -1153,12 +1153,13 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
 
     // Fire-and-forget order emails (WooCommerce-style). Never break checkout.
     const storeName = site.store_name || enr.slug;
+    const storeContact = { name: storeName, email: site.email, phone: site.phone, whatsapp: site.whatsapp, address: site.address };
     const emailOrder = {
       order_no: order.order_no, total: subtotal, subtotal,
       address: { ...shipTo, phone }, buyer_name: name, buyer_phone: phone, buyer_email: email,
       payment_status: "unpaid",
     };
-    if (email) sendCustomerOrderEmail({ to: email, brand: storeName, order: emailOrder, items: lineItems, kind: "placed" });
+    if (email) sendCustomerOrderEmail({ to: email, brand: storeName, order: emailOrder, items: lineItems, kind: "placed", contact: storeContact });
     (async () => {
       try {
         // Vendor/admin new-order alert → the storefront's own email (site.email)
@@ -1168,7 +1169,7 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
           const vendor = (await query(`select u.email from users u join enrollments e on e.user_id=u.id where e.id=$1`, [enr.id])).rows[0];
           notifyTo = vendor?.email;
         }
-        if (notifyTo) sendVendorOrderEmail({ to: notifyTo, brand: storeName, order: emailOrder, items: lineItems, storeName });
+        if (notifyTo) sendVendorOrderEmail({ to: notifyTo, brand: storeName, order: emailOrder, items: lineItems, storeName, contact: storeContact });
       } catch (e) { console.error("[order-email vendor] lookup failed:", e.message); }
     })();
 

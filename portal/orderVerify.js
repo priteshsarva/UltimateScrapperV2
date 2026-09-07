@@ -68,9 +68,10 @@ export async function verifyOrderPayment(orderId, { utr = null } = {}) {
     [orderId, utr, wholesalerTotal, retailerShare, platformFee, gatewayFee]
   );
 
-  // Payment confirmed → tell the customer their order is processing.
-  const brand = (await query(`select store_name from site_settings where enrollment_id=$1`, [order.enrollment_id])).rows[0]?.store_name;
-  sendCustomerOrderEmail({ to: order.buyer_email, brand, order: { ...order, payment_status: "verified", status: "processing" }, items, kind: "processing" });
+  // Payment confirmed → tell the customer their order is processing (from the store).
+  const ss = (await query(`select store_name, email, phone, whatsapp, address from site_settings where enrollment_id=$1`, [order.enrollment_id])).rows[0] || {};
+  const contact = { name: ss.store_name, email: ss.email, phone: ss.phone, whatsapp: ss.whatsapp, address: ss.address };
+  sendCustomerOrderEmail({ to: order.buyer_email, brand: ss.store_name, order: { ...order, payment_status: "verified", status: "processing" }, items, kind: "processing", contact });
 
   return { ok: true, split: { wholesalerTotal, retailerShare, platformFee, gatewayFee, held: store.payout_mode === "platform" } };
 }

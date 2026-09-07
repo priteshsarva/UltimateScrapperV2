@@ -15,8 +15,26 @@ const BG = "#f4f4f6";
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const inr = (n) => "₹" + Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
-// Full HTML document wrapping the body content.
-export function wrap({ title, brand = "Server Products", intro = "", bodyHtml = "", accent = ACCENT }) {
+// Footer contact block — the STOREFRONT's own details (so the customer contacts
+// the store, not the platform). `contact` = { name, email, phone, whatsapp, address }.
+function footer(brand, contact) {
+  const c = contact || {};
+  const bits = [
+    c.email ? `✉ ${esc(c.email)}` : "",
+    c.phone ? `📞 ${esc(c.phone)}` : "",
+    c.whatsapp ? `WhatsApp ${esc(c.whatsapp)}` : "",
+  ].filter(Boolean).join(" &nbsp;·&nbsp; ");
+  const addr = c.address && typeof c.address === "object"
+    ? [c.address.line1, c.address.city, c.address.state, c.address.pincode].filter(Boolean).join(", ") : "";
+  return `<p style="margin:0 0 4px;font-size:12px;font-weight:700;color:${INK};">${esc(c.name || brand)}</p>
+    ${bits ? `<p style="margin:0 0 2px;font-size:12px;color:${MUTED};">${bits}</p>` : ""}
+    ${addr ? `<p style="margin:0 0 2px;font-size:12px;color:${MUTED};">${esc(addr)}</p>` : ""}
+    <p style="margin:8px 0 0;font-size:11px;color:${MUTED};">This is an automated message about your order.</p>`;
+}
+
+// Full HTML document wrapping the body content. `contact` populates the footer
+// with the storefront's own details.
+export function wrap({ title, brand = "Server Products", intro = "", bodyHtml = "", accent = ACCENT, contact = null }) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title></head>
 <body style="margin:0;padding:0;background:${BG};-webkit-text-size-adjust:none;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BG};padding:24px 0;">
@@ -31,7 +49,7 @@ export function wrap({ title, brand = "Server Products", intro = "", bodyHtml = 
         </td></tr>
         <tr><td style="padding:0 40px 32px;">${bodyHtml}</td></tr>
         <tr><td style="padding:22px 40px;background:#fafafa;border-top:1px solid ${LINE};">
-          <p style="margin:0;font-size:12px;line-height:1.6;color:${MUTED};">${esc(brand)} — this is an automated message about your order/account.</p>
+          ${footer(brand, contact)}
         </td></tr>
       </table>
     </td></tr>

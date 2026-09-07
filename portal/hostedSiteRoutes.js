@@ -71,8 +71,9 @@ async function emailOrderStatus(orderId, status) {
     const order = (await query(`select * from orders where id=$1`, [orderId])).rows[0];
     if (!order || !order.buyer_email) return;
     const items = (await query(`select product_name, size, qty, unit_price, line_total from order_items where order_id=$1`, [orderId])).rows;
-    const brand = (await query(`select store_name from site_settings where enrollment_id=$1`, [order.enrollment_id])).rows[0]?.store_name;
-    sendCustomerOrderEmail({ to: order.buyer_email, brand, order, items, kind: status });
+    const ss = (await query(`select store_name, email, phone, whatsapp, address from site_settings where enrollment_id=$1`, [order.enrollment_id])).rows[0] || {};
+    const contact = { name: ss.store_name, email: ss.email, phone: ss.phone, whatsapp: ss.whatsapp, address: ss.address };
+    sendCustomerOrderEmail({ to: order.buyer_email, brand: ss.store_name, order, items, kind: status, contact });
   } catch (e) { console.error("[order status email]", e.message); }
 }
 
