@@ -9,6 +9,7 @@ import {
   getPlatformUpi, savePlatformUpi, getPlatformConfig, savePlatformConfig,
 } from "./settings.js";
 import { sendMail } from "./mailer.js";
+import { EMAIL_TYPES, renderSampleEmail } from "./emailSamples.js";
 
 // ---------- admin ----------
 const adminRouter = Router();
@@ -34,6 +35,16 @@ adminRouter.put("/smtp", async (req, res) => {
   else { const cur = await getSmtpConfig(); patch.pass = cur.pass; } // preserve
   try { await saveSettings("smtp", patch); res.json({ ok: true, smtp: await getSmtpConfigMasked() }); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Email template preview: list types + render a sample of one (?type=).
+adminRouter.get("/email-preview", (req, res) => {
+  try {
+    const types = EMAIL_TYPES.map(([value, label]) => ({ value, label }));
+    const type = req.query.type || types[0].value;
+    const { subject, html } = renderSampleEmail(type);
+    res.json({ types, type, subject, html });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // send a test email to the given address (or the admin's own)

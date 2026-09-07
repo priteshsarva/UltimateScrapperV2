@@ -8,6 +8,7 @@ import { getWallet, walletLedger, ledger } from "./wallet.js";
 import { getPlatformConfig } from "./settings.js";
 import { notify } from "./notifications.js";
 import { sendMail } from "./mailer.js";
+import { sendPayoutEmail } from "./orderEmails.js";
 
 const asyncH = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => {
   console.error("[wallet]", e.message);
@@ -118,10 +119,9 @@ adminRouter.patch("/payouts/:id", asyncH(async (req, res) => {
     await query(`update payout_requests set status='cancelled', note=$2, reviewed_by=$3 where id=$1`, [p.id, (req.body?.note || null), req.user.sub]);
     await notifyUser(p.user_id, `Your payout request of ₹${Number(p.amount).toLocaleString("en-IN")} was cancelled${req.body?.note ? `: ${req.body.note}` : ""}.`);
   }
-  // email (best-effort)
-  const u = (await query(`select email, name from users where id=$1`, [p.user_id])).rows[0];
-  if (u?.email) sendMail({ to: u.email, subject: `Payout ${status}`,
-    html: `<p>Hi ${u.name || ""}, your payout of ₹${Number(p.amount).toLocaleString("en-IN")} is now <b>${status}</b>${status === "paid" && utr ? ` (UTR ${utr})` : ""}.</p>` }).catch(() => {});
+  // email (best-effort, WooCommerce-style)
+  const u = (await query(`select email from users where id=$1`, [p.user_id])).rows[0];
+  sendPayoutEmail({ to: u?.email, kind: status, amount: p.amount, utr, note: req.body?.note });
   res.json({ ok: true });
 }));
 
