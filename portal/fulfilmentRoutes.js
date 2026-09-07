@@ -185,6 +185,30 @@ adminRouter.get("/orders-pending-shipment", asyncH(async (req, res) => {
   res.json({ orders: rows });
 }));
 
+// Every order with its computed shipment status, for the admin's shipment list.
+// filter: 'to_ship' (paid, not shipped) | 'shipped' | 'all'.
+adminRouter.get("/order-shipments", asyncH(async (req, res) => {
+  const filter = req.query.filter || "to_ship";
+  const shippedExpr = `(o.status='completed' or exists(
+      select 1 from shipments sh where sh.order_id=o.id and sh.status='approved'
+        and sh.leg in ('retailer_to_customer','wholesaler_to_customer')))`;
+  let where = "1=1";
+  if (filter === "to_ship") where = `o.payment_status='verified' and o.status<>'cancelled' and not ${shippedExpr}`;
+  else if (filter === "shipped") where = shippedExpr;
+  const rows = (await query(
+    `select o.id, o.order_no, o.total, o.status, o.payment_status, o.fulfilment_mode, o.created_at, o.buyer_name,
+            coalesce(s.store_name, e.slug) as store_name,
+            ${shippedExpr} as shipped,
+            exists(select 1 from shipments sh where sh.order_id=o.id and sh.status='submitted') as has_submitted
+       from orders o
+       join enrollments e on e.id = o.enrollment_id
+       left join site_settings s on s.enrollment_id = e.id
+      where ${where}
+      order by o.created_at desc limit 400`
+  )).rows;
+  res.json({ orders: rows });
+}));
+
 // Admin marks an order shipped without waiting for proof: create an approved
 // shipment for the customer-facing leg, RELEASE all outstanding holds (pay every
 // party), and complete the order.
