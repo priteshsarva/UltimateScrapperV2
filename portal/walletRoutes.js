@@ -24,11 +24,30 @@ clientRouter.use(requireAuth);
 
 clientRouter.get("/wallet", asyncH(async (req, res) => {
   const wallet = await getWallet(req.user.sub);
-  const ledgerRows = await walletLedger(req.user.sub, 100);
   const { payout_terms_text } = await getPlatformConfig();
   const pending = (await query(`select * from payout_requests where user_id=$1 and status in ('requested','processing') order by created_at desc`, [req.user.sub])).rows;
   const history = (await query(`select * from payout_requests where user_id=$1 order by created_at desc limit 50`, [req.user.sub])).rows;
-  res.json({ wallet, ledger: ledgerRows, terms_text: payout_terms_text, pending, payouts: history });
+
+  // Ledger with the order number attached, and a per-order breakdown (held vs
+  // released vs paid-out) so the vendor sees exactly where each rupee came from.
+  const ledgerRows = (await query(
+    `select l.id, l.type, l.amount, l.balance_after, l.note, l.created_at, o.order_no, o.status as order_status
+       from wallet_ledger l left join orders o on o.id = l.order_id
+      where l.user_id=$1 order by l.created_at desc limit 300`, [req.user.sub]
+  )).rows;
+  const byOrderMap = new Map();
+  for (const l of ledgerRows) {
+    if (!l.order_no) continue;
+    const k = l.order_no;
+    const g = byOrderMap.get(k) || { order_no: k, order_status: l.order_status, held: 0, released: 0, refunded: 0, at: l.created_at };
+    if (l.type === "hold") g.held += Number(l.amount);
+    else if (l.type === "release") g.released += Number(l.amount);
+    else if (l.type === "refund") g.refunded += Number(l.amount);
+    byOrderMap.set(k, g);
+  }
+  const by_order = [...byOrderMap.values()].map((g) => ({ ...g, outstanding: Math.max(0, g.held - g.released - g.refunded) }));
+
+  res.json({ wallet, ledger: ledgerRows, by_order, terms_text: payout_terms_text, pending, payouts: history });
 }));
 
 clientRouter.put("/wallet/payout-details", asyncH(async (req, res) => {
@@ -85,6 +104,46 @@ adminRouter.patch("/wallets/:userId", asyncH(async (req, res) => {
   await query(`insert into wallets (user_id, payout_threshold) values ($1,$2)
                on conflict (user_id) do update set payout_threshold=$2, updated_at=now()`, [req.params.userId, t]);
   res.json({ ok: true });
+}));
+
+// Platform money position — what the admin is holding, owes, and has earned.
+adminRouter.get("/money-summary", asyncH(async (req, res) => {
+  const o = (await query(
+    `select coalesce(sum(total),0) collected, coalesce(sum(platform_fee),0) platform_fees,
+            coalesce(sum(gateway_fee),0) gateway_fees, count(*)::int verified_orders
+       from orders where payment_status='verified'`
+  )).rows[0];
+  const w = (await query(`select coalesce(sum(held),0) held, coalesce(sum(available),0) available from wallets`)).rows[0];
+  const paidOut = (await query(`select coalesce(sum(amount),0) v from wallet_ledger where type='payout'`)).rows[0].v;
+  const pendingPayouts = (await query(`select coalesce(sum(amount),0) v, count(*)::int n from payout_requests where status in ('requested','processing')`)).rows[0];
+  const awaiting = (await query(`select count(*)::int n from orders where payment_status in ('unpaid','claimed')`)).rows[0].n;
+  res.json({
+    collected: Number(o.collected),
+    platform_fees: Number(o.platform_fees),
+    gateway_fees: Number(o.gateway_fees),
+    platform_earnings: Number(o.platform_fees) + Number(o.gateway_fees),
+    held: Number(w.held),                       // vendor money reserved (pending shipment)
+    vendor_available: Number(w.available),      // vendor money owed & withdrawable
+    paid_out: Number(paidOut),
+    pending_payouts: Number(pendingPayouts.v),
+    pending_payouts_count: pendingPayouts.n,
+    verified_orders: o.verified_orders,
+    awaiting_verification: awaiting,
+  });
+}));
+
+// Orders whose payment still needs the admin to verify it (platform-held stores).
+adminRouter.get("/payments-to-verify", asyncH(async (req, res) => {
+  const rows = (await query(
+    `select o.id, o.order_no, o.total, o.payment_status, o.created_at, o.buyer_name, e.payout_mode,
+            coalesce(s.store_name, e.slug) as store_name
+       from orders o
+       join enrollments e on e.id = o.enrollment_id
+       left join site_settings s on s.enrollment_id = e.id
+      where o.payment_status in ('claimed','unpaid') and e.payout_mode='platform'
+      order by (o.payment_status='claimed') desc, o.created_at desc limit 200`
+  )).rows;
+  res.json({ orders: rows });
 }));
 
 adminRouter.get("/payouts", asyncH(async (req, res) => {
