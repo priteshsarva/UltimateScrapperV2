@@ -130,3 +130,13 @@ alter table order_items
 alter table shipments drop constraint if exists shipments_leg_check;
 alter table shipments add constraint shipments_leg_check
   check (leg in ('wholesaler_to_retailer','retailer_to_customer','wholesaler_to_customer'));
+
+-- Order status -> WooCommerce vocabulary; payments default to platform-held.
+alter table orders drop constraint if exists orders_status_check;
+update orders set status='processing' where status in ('confirmed','shipped');
+update orders set status='completed' where status='delivered';
+alter table orders add constraint orders_status_check
+  check (status in ('pending','processing','on-hold','completed','cancelled','refunded'));
+alter table orders alter column status set default 'pending';
+alter table enrollments alter column payout_mode set default 'platform';
+update enrollments set payout_mode='platform' where type='hosted' and (payout_mode is null or payout_mode='direct');

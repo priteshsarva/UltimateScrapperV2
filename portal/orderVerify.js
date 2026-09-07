@@ -61,7 +61,7 @@ export async function verifyOrderPayment(orderId, { utr = null } = {}) {
 
   // 4. mark verified + confirmed, freeze the split
   await query(
-    `update orders set payment_status='verified', payment_utr=coalesce($2, payment_utr), status='confirmed',
+    `update orders set payment_status='verified', payment_utr=coalesce($2, payment_utr), status='processing',
        share_wholesaler=$3, share_retailer=$4, platform_fee=$5, gateway_fee=$6, updated_at=now()
      where id=$1`,
     [orderId, utr, wholesalerTotal, retailerShare, platformFee, gatewayFee]

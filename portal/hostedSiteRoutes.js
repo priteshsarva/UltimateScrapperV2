@@ -539,7 +539,7 @@ clientRouter.get("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) =>
 }));
 
 // PATCH /portal/hosted-sites/:id/orders/:orderId  { status }
-const ORDER_STATUSES = new Set(["pending", "confirmed", "shipped", "delivered", "cancelled"]);
+const ORDER_STATUSES = new Set(["pending", "processing", "on-hold", "completed", "cancelled", "refunded"]);
 clientRouter.patch("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const { status } = req.body || {};

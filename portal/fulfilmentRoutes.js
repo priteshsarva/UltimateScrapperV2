@@ -112,7 +112,7 @@ clientRouter.put("/hosted-sites/:id/payout-mode", asyncH(async (req, res) => {
 // Submit a shipment leg with parcel photos (2..10).
 clientRouter.post("/shipments", asyncH(async (req, res) => {
   const { order_id, leg, courier, tracking_no, photos } = req.body || {};
-  if (!order_id || !["wholesaler_to_retailer", "retailer_to_customer"].includes(leg)) return res.status(400).json({ error: "order_id and a valid leg are required" });
+  if (!order_id || !["wholesaler_to_retailer", "retailer_to_customer", "wholesaler_to_customer"].includes(leg)) return res.status(400).json({ error: "order_id and a valid leg are required" });
   const pics = Array.isArray(photos) ? photos.filter((p) => p && p.url) : [];
   if (pics.length < 2) return res.status(400).json({ error: "At least 2 parcel photos are required." });
   if (pics.length > 10) return res.status(400).json({ error: "Up to 10 photos." });

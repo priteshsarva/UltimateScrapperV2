@@ -19,6 +19,8 @@ import { priceProduct, priceSqlExpr } from "./pricing.js";
 import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
 import { applyBrandToRows, rawBrandsFor, canonicalBrand, subBrandsFor, rawBrandsForSub, brandInfo, primaryBrandSet } from "./brandMap.js";
+import { getPlatformUpi } from "./settings.js";
+import { notify as notifyFeed } from "./notifications.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FOLDER = path.resolve(__dirname, "../databases");
@@ -327,6 +329,17 @@ function buildWhatsAppUrl(whatsapp, orderNo, items, total, address, storeName) {
 router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
   const enr = req.storeEnrollment;
   const site = await loadSiteSettings(enr.id);
+  // Payment: platform-mode stores collect to the PLATFORM UPI (admin verifies);
+  // direct-mode stores collect to their OWN UPI (vendor verifies). The screenshot
+  // always goes to the store's WhatsApp either way.
+  const payoutMode = (await query(`select payout_mode from enrollments where id=$1`, [enr.id])).rows[0]?.payout_mode || "platform";
+  const platformUpi = payoutMode === "platform" ? await getPlatformUpi() : null;
+  const payment = {
+    mode: payoutMode,
+    upi_id: payoutMode === "platform" ? (platformUpi.upi_id || null) : (site.upi_id || null),
+    upi_name: payoutMode === "platform" ? (platformUpi.upi_name || null) : (site.upi_name || null),
+    whatsapp: site.whatsapp || null,
+  };
   const dbRows = (await query(
     `select distinct s.category as db_name
        from enrollment_sources es join sources s on s.id = es.source_id
@@ -357,6 +370,7 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     upi_id: site.upi_id || null,
     upi_name: site.upi_name || null,
     payment_position: site.payment_position || "after", // 'after' | 'before' address
+    payment, // { mode, upi_id, upi_name, whatsapp } — which UPI the buyer pays
 
     email: site.email || null,
     phone: site.phone || null,
@@ -1116,6 +1130,24 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
     }
     await client.query("COMMIT");
 
+    // Save a freshly-typed address to the buyer's address book so it prefills
+    // next time. Only when they typed one (not a saved address_id) and we have a
+    // customer; first address becomes the default. Best-effort — never blocks.
+    if (customerId && !address_id && shipTo && shipTo.line1) {
+      try {
+        const existing = (await query(`select count(*)::int n from customer_addresses where customer_id=$1`, [customerId])).rows[0].n;
+        const dupe = (await query(
+          `select 1 from customer_addresses where customer_id=$1 and line1=$2 and city=$3 and pincode=$4`,
+          [customerId, shipTo.line1, shipTo.city || "", shipTo.pincode || ""]
+        )).rows.length;
+        if (!dupe) await query(
+          `insert into customer_addresses (customer_id, name, phone, line1, line2, city, state, pincode, is_default)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [customerId, name, phone, shipTo.line1, shipTo.line2 || null, shipTo.city || "", shipTo.state || "", shipTo.pincode || "", existing === 0]
+        );
+      } catch (e) { console.error("[order] save address book failed:", e.message); }
+    }
+
     const wa_url = buildWhatsAppUrl(site.whatsapp, order.order_no, lineItems, subtotal, { ...shipTo, phone }, site.store_name || enr.slug);
 
     // Fire-and-forget order emails. Failures are logged inside sendMail;
@@ -1150,6 +1182,28 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
   } finally {
     client.release();
   }
+}));
+
+// Buyer marks an order as paid (tapped "send screenshot on WhatsApp"). This is a
+// CLAIM, not verification — it flips payment_status unpaid->claimed so the pay
+// page stops nagging on refresh, and pings whoever verifies (admin for platform
+// -held stores, the vendor for direct). The real 'verified' is set later.
+router.post("/:slug/orders/:orderNo/claim", resolveStore, asyncH(async (req, res) => {
+  const enr = req.storeEnrollment;
+  const o = (await query(
+    `update orders set payment_status='claimed', updated_at=now()
+      where enrollment_id=$1 and order_no=$2 and payment_status='unpaid' returning id, order_no`,
+    [enr.id, req.params.orderNo]
+  )).rows[0];
+  // already claimed/verified is fine — just report success (idempotent for the UI)
+  if (!o) return res.json({ ok: true, already: true });
+
+  const site = await loadSiteSettings(enr.id);
+  const mode = (await query(`select payout_mode, user_id from enrollments where id=$1`, [enr.id])).rows[0] || {};
+  const label = `Payment claimed for ${o.order_no} (${site.store_name || enr.slug}) — verify it.`;
+  if (mode.payout_mode === "platform") notifyFeed({ audience: "admin", type: "payment", title: label }).catch(() => {});
+  else if (mode.user_id) notifyFeed({ user_id: mode.user_id, type: "payment", title: label }).catch(() => {});
+  res.json({ ok: true });
 }));
 
 router.get("/:slug/me/orders", resolveStore, identifyCustomer, requireCustomer, asyncH(async (req, res) => {
