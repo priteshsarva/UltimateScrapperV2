@@ -16,7 +16,8 @@ router.get("/users", async (req, res) => {
     const rows = (await query(
       `select
          u.id, u.email, u.name, u.role, u.status, u.created_at,
-         u.mobile, u.whatsapp_number, u.whatsapp_community_url, u.social_urls,
+         u.mobile, u.mobile_verified, u.profile_complete,
+         u.whatsapp_number, u.whatsapp_community_url, u.social_urls,
          count(distinct e.id)                                            as shops,
          count(distinct e.id) filter (where e.status = 'active')         as active_shops,
          count(distinct e.id) filter (where e.type = 'hosted')           as storefronts,

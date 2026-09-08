@@ -59,6 +59,7 @@ import archiveRoutes from "./portal/archiveRoutes.js";
 import { sppSyncLogger } from './spp-sync-logger.js';
 import storeRoutes from "./portal/storeRoutes.js";
 import catalogueRoutes from "./portal/catalogueRoutes.js";
+import { searchPublicRoutes, searchAuthRoutes, searchPlanRoutes, searchPlanAdminRoutes } from "./portal/searchRoutes.js";
 import notificationRoutes from "./portal/notificationRoutes.js";
 import brandMapRoutes from "./portal/brandMapRoutes.js";
 import { clientRouter as hostedSiteRoutes, adminRouter as adminHostedSiteRoutes } from "./portal/hostedSiteRoutes.js";
@@ -217,6 +218,10 @@ app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-
 app.use("/store", storeRoutes);                          // public: /store/:slug/* hosted storefronts
 app.use("/portal", hostedSiteRoutes);                     // vendor: /portal/hosted-sites...
 app.use("/portal", catalogueRoutes);                      // vendor: /portal/catalogue (research)
+app.use("/search", searchPublicRoutes);                   // PUBLIC landing: /search/catalogue, /quota, /sources
+app.use("/search-auth", searchAuthRoutes);                // PUBLIC: mobile OTP send/verify
+app.use("/search-plan", searchPlanRoutes);                // client: ₹100/mo search plan (authed)
+app.use("/portal/admin", searchPlanAdminRoutes);          // admin: verify search-plan payments
 app.use("/portal", notificationRoutes);                   // /portal/notifications
 app.use("/portal/admin", adminHostedSiteRoutes);          // admin: /portal/admin/hosted-sites, /orders
 app.use("/portal", wholesaleClientRoutes);                // vendor: /portal/wholesale/*, /portal/taxonomy
