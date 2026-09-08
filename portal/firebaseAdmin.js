@@ -16,9 +16,9 @@ async function ensureApp() {
   const p = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (!p || !fs.existsSync(p)) { console.warn("[firebase] FIREBASE_SERVICE_ACCOUNT not set/found — Firebase auth disabled"); return null; }
   try {
-    const { default: admin } = await import("firebase-admin");
+    const { initializeApp, cert, getApps } = await import("firebase-admin/app");
     const cred = JSON.parse(fs.readFileSync(p, "utf8"));
-    app = admin.apps.length ? admin.app() : admin.initializeApp({ credential: admin.credential.cert(cred) });
+    app = getApps().length ? getApps()[0] : initializeApp({ credential: cert(cred) });
     return app;
   } catch (e) { console.error("[firebase] init failed:", e.message); return null; }
 }
@@ -26,6 +26,6 @@ async function ensureApp() {
 export async function verifyFirebaseIdToken(idToken) {
   const a = await ensureApp();
   if (!a) throw new Error("Firebase not configured");
-  const { default: admin } = await import("firebase-admin");
-  return admin.auth(a).verifyIdToken(idToken);   // { phone_number, uid, ... }
+  const { getAuth } = await import("firebase-admin/auth");
+  return getAuth(a).verifyIdToken(idToken);   // { phone_number, uid, ... }
 }
