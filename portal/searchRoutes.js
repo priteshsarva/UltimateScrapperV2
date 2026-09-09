@@ -18,6 +18,35 @@ import { searchCatalogue } from "./catalogueSearch.js";
 import { getPlatformUpi } from "./settings.js";
 import { verifyFirebaseIdToken } from "./firebaseAdmin.js";
 import { getPlan } from "./plans.js";
+import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
+
+// Fire-and-forget live re-scrape of one product when it's opened from search.
+// Guarded so public traffic can't pile onto the Puppeteer gate: per-product
+// cooldown + a global in-flight cap, and only when the row is actually stale.
+const CATS = new Set(["watches", "shoes"]);
+const _refreshing = new Set();
+const _lastRefresh = new Map();
+const REFRESH_COOLDOWN_MS = 60 * 1000;
+const REFRESH_MAX_INFLIGHT = Math.max(1, parseInt(process.env.REFRESH_MAX_INFLIGHT, 10) || 4);
+function kickLiveRefresh(category, productId) {
+  if (!CATS.has(category) || !productId) return;
+  const k = category + ":" + productId;
+  if (_refreshing.has(k)) return;
+  if (_lastRefresh.has(k) && Date.now() - _lastRefresh.get(k) < REFRESH_COOLDOWN_MS) return;
+  if (_refreshing.size >= REFRESH_MAX_INFLIGHT) return;
+  _refreshing.add(k); _lastRefresh.set(k, Date.now());
+  if (_lastRefresh.size > 20000) _lastRefresh.clear();
+  (async () => {
+    try {
+      const product = await findProduct(productId, category);
+      if (product && isStale(product)) {
+        console.log(`[search-refresh] live scrape ${k} ${product.productUrl || ""}`);
+        await rescrape(product, category);
+      }
+    } catch (e) { console.log(`[search-refresh] failed ${k} -> ${e.message}`); }
+    finally { _refreshing.delete(k); }
+  })();
+}
 
 const intervalDays = (interval, count) => (Number(count) || 1) * ({ day: 1, week: 7, month: 30, year: 365 }[interval] || 30);
 
@@ -139,14 +168,19 @@ pub.get("/catalogue", asyncH(async (req, res) => {
 // Opening a product counts as a search too. Same free allowance / gate; opening
 // the same product again (your last action) is free.
 pub.post("/consume", asyncH(async (req, res) => {
+  const category = String(req.body?.category || "").slice(0, 40);
+  const productId = String(req.body?.productId || "").slice(0, 80);
+  const key = "open:" + category + ":" + productId;
   const quota = await getQuota(req);
-  if (quota.plan) return res.json({ ok: true, quota: quotaOut(quota) });   // unlimited plan
-  const key = "open:" + String(req.body?.key || "").slice(0, 120);
-  if (key === (quota.last_q || "")) return res.json({ ok: true, quota: quotaOut(quota) });
+  // Opening a product also kicks a background live re-scrape (fire-and-forget).
+  const allow = () => { kickLiveRefresh(category, productId); res.json({ ok: true, quota: quotaOut(quota) }); };
+
+  if (quota.unlimited) return allow();                       // active plan w/ unlimited views
+  if (key === (quota.last_q || "")) return allow();          // same product again — free, still refresh
   if (quota.remaining <= 0)
     return res.status(403).json({ error: "Free views used up", need: quota.need, quota: quotaOut(quota) });
   await bump(req, quota, key); quota.used += 1; quota.remaining -= 1;
-  res.json({ ok: true, quota: quotaOut(quota) });
+  allow();
 }));
 
 // ============================================================ OTP mobile auth
