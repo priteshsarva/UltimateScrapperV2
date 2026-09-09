@@ -79,14 +79,8 @@ async function getQuota(req) {
            remaining: Math.max(0, FREE_ANON - used), need: "signup", device_id: dev };
 }
 
-// A billable action is keyed so we can de-dupe: a new keyword search
-// (key=the query) or opening a product (key="open:cat:id"). Filter tweaks,
-// pagination and repeating your last action don't cost anything.
-const catalogueActionKey = (req) => {
-  const q = (req.query.q || "").toString().trim().toLowerCase();
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  return q && page === 1 ? q : null;   // null = browse/pagination, never counts
-};
+// Only opening a product costs a view (keyed "open:cat:id" so re-opening the
+// same product back-to-back is free). Searching and browsing are unlimited.
 async function bump(req, quota, key) {
   if (quota.scope === "user")
     await query(`update users set search_used=search_used+1, search_last_q=$2 where id=$1`, [req.user.sub, key]);
@@ -109,16 +103,9 @@ pub.get("/sources", asyncH(async (_req, res) => {
 }));
 
 pub.get("/catalogue", asyncH(async (req, res) => {
+  // Searching + browsing are free; only opening a product (POST /consume) counts.
   const quota = await getQuota(req);
-  const key = catalogueActionKey(req);
-  const willCount = key && key !== (quota.last_q || "");
-  // Block only a NEW keyword search once the free allowance is spent; browsing
-  // (empty q), pagination and repeats stay open so the page isn't a dead end.
-  if (willCount && quota.remaining <= 0)
-    return res.status(403).json({ error: "Free searches used up", need: quota.need, quota: quotaOut(quota) });
-
   const out = await searchCatalogue(req.query);
-  if (willCount) { await bump(req, quota, key); quota.used += 1; quota.remaining -= 1; }
   res.json({ ...out, quota: quotaOut(quota) });
 }));
 
