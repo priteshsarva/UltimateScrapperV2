@@ -221,6 +221,12 @@ planR.post("/order", asyncH(async (req, res) => {
   const planId = req.body?.plan_id || null;
   const plan = planId ? await getPlan(planId) : null;
   const amount = plan ? Number(plan.price) : 100;
+  // Free plan: grant immediately, no payment / QR.
+  if (plan && amount <= 0) {
+    await grantSearchPlan(req.user.sub, plan);
+    await query(`insert into search_plan_orders (user_id, plan_id, amount, status, paid_at) values ($1,$2,0,'paid',now())`, [req.user.sub, planId]);
+    return res.json({ granted: true, amount: 0, plan });
+  }
   let order = (await query(`select * from search_plan_orders where user_id=$1 and status in ('pending','claimed') order by created_at desc limit 1`, [req.user.sub])).rows[0];
   if (order) order = (await query(`update search_plan_orders set plan_id=$2, amount=$3 where id=$1 returning *`, [order.id, planId, amount])).rows[0];
   else order = (await query(`insert into search_plan_orders (user_id, plan_id, amount) values ($1,$2,$3) returning *`, [req.user.sub, planId, amount])).rows[0];
