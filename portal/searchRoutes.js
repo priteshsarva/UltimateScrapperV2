@@ -17,6 +17,50 @@ import { signToken, requireAuth, requireAdmin, hashPassword } from "./auth.js";
 import { searchCatalogue } from "./catalogueSearch.js";
 import { getPlatformUpi } from "./settings.js";
 import { verifyFirebaseIdToken } from "./firebaseAdmin.js";
+import { getPlan } from "./plans.js";
+import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
+
+// Fire-and-forget live re-scrape of one product when it's opened from search.
+// Guarded so public traffic can't pile onto the Puppeteer gate: per-product
+// cooldown + a global in-flight cap, and only when the row is actually stale.
+const CATS = new Set(["watches", "shoes"]);
+const _refreshing = new Set();
+const _lastRefresh = new Map();
+const REFRESH_COOLDOWN_MS = 60 * 1000;
+const REFRESH_MAX_INFLIGHT = Math.max(1, parseInt(process.env.REFRESH_MAX_INFLIGHT, 10) || 4);
+function kickLiveRefresh(category, productId) {
+  if (!CATS.has(category) || !productId) return;
+  const k = category + ":" + productId;
+  if (_refreshing.has(k)) return;
+  if (_lastRefresh.has(k) && Date.now() - _lastRefresh.get(k) < REFRESH_COOLDOWN_MS) return;
+  if (_refreshing.size >= REFRESH_MAX_INFLIGHT) return;
+  _refreshing.add(k); _lastRefresh.set(k, Date.now());
+  if (_lastRefresh.size > 20000) _lastRefresh.clear();
+  (async () => {
+    try {
+      const product = await findProduct(productId, category);
+      if (product && isStale(product)) {
+        console.log(`[search-refresh] live scrape ${k} ${product.productUrl || ""}`);
+        await rescrape(product, category);
+      }
+    } catch (e) { console.log(`[search-refresh] failed ${k} -> ${e.message}`); }
+    finally { _refreshing.delete(k); }
+  })();
+}
+
+const intervalDays = (interval, count) => (Number(count) || 1) * ({ day: 1, week: 7, month: 30, year: 365 }[interval] || 30);
+
+// Grant/upgrade a user's search plan, effective now. views 0 = unlimited.
+// A null plan falls back to the legacy 30-day unlimited grant.
+async function grantSearchPlan(userId, plan) {
+  const days = plan ? intervalDays(plan.interval, plan.interval_count) : 30;
+  const views = Number(plan?.limits?.search_views || 0);   // 0 = unlimited
+  await query(
+    `update users set search_used = 0, search_plan_views = $2,
+        search_plan_until = now() + ($3 || ' days')::interval
+      where id = $1`, [userId, views, days]
+  );
+}
 
 const JWT_SECRET = process.env.JWT_SECRET || "change-me-in-env";
 const FREE_ANON = 3;
@@ -66,16 +110,19 @@ function softAuth(req, _res, next) {
 //   -> { scope:'user'|'anon', limit, used, remaining, plan:bool, need }
 async function getQuota(req) {
   if (req.user) {
-    const u = (await query(`select search_used, search_last_q, search_plan_until from users where id=$1`, [req.user.sub])).rows[0] || {};
-    const plan = u.search_plan_until && new Date(u.search_plan_until) > new Date();
+    const u = (await query(`select search_used, search_last_q, search_plan_until, search_plan_views from users where id=$1`, [req.user.sub])).rows[0] || {};
+    const planActive = u.search_plan_until && new Date(u.search_plan_until) > new Date();
+    const views = Number(u.search_plan_views || 0);          // 0 = unlimited while the plan is active
+    const unlimited = planActive && views === 0;
+    const limit = unlimited ? Infinity : (planActive ? views : FREE_USER);
     const used = Number(u.search_used || 0);
-    return { scope: "user", plan: !!plan, limit: plan ? Infinity : FREE_USER, used, last_q: u.search_last_q || "",
-             remaining: plan ? Infinity : Math.max(0, FREE_USER - used), need: "plan" };
+    return { scope: "user", plan: !!planActive, unlimited, limit, used, last_q: u.search_last_q || "",
+             remaining: unlimited ? Infinity : Math.max(0, limit - used), need: "plan" };
   }
   const dev = String(req.headers["x-device-id"] || "").slice(0, 100);
   const row = dev ? (await query(`select used, last_q from anon_search where device_id=$1`, [dev])).rows[0] : null;
   const used = Number(row?.used || 0);
-  return { scope: "anon", plan: false, limit: FREE_ANON, used, last_q: row?.last_q || "",
+  return { scope: "anon", plan: false, unlimited: false, limit: FREE_ANON, used, last_q: row?.last_q || "",
            remaining: Math.max(0, FREE_ANON - used), need: "signup", device_id: dev };
 }
 
@@ -88,7 +135,7 @@ async function bump(req, quota, key) {
     await query(`insert into anon_search (device_id, used, last_q, updated_at) values ($1,1,$2,now())
                  on conflict (device_id) do update set used=anon_search.used+1, last_q=$2, updated_at=now()`, [quota.device_id, key]);
 }
-const quotaOut = (qt) => ({ scope: qt.scope, plan: qt.plan, used: qt.used,
+const quotaOut = (qt) => ({ scope: qt.scope, plan: qt.plan, unlimited: !!qt.unlimited, used: qt.used,
   limit: qt.limit === Infinity ? null : qt.limit, remaining: qt.remaining === Infinity ? null : qt.remaining });
 
 // ============================================================ public search
@@ -102,6 +149,15 @@ pub.get("/sources", asyncH(async (_req, res) => {
   res.json({ sources: rows });
 }));
 
+// Plans the admin flagged for the search landing (their own plans, live-managed).
+pub.get("/plans", asyncH(async (_req, res) => {
+  const rows = (await query(
+    `select id, name, price, currency, interval, interval_count, description, features, limits
+       from plans where active = true and show_on_search = true order by sort_order, price`
+  )).rows;
+  res.json({ plans: rows });
+}));
+
 pub.get("/catalogue", asyncH(async (req, res) => {
   // Searching + browsing are free; only opening a product (POST /consume) counts.
   const quota = await getQuota(req);
@@ -112,14 +168,19 @@ pub.get("/catalogue", asyncH(async (req, res) => {
 // Opening a product counts as a search too. Same free allowance / gate; opening
 // the same product again (your last action) is free.
 pub.post("/consume", asyncH(async (req, res) => {
+  const category = String(req.body?.category || "").slice(0, 40);
+  const productId = String(req.body?.productId || "").slice(0, 80);
+  const key = "open:" + category + ":" + productId;
   const quota = await getQuota(req);
-  if (quota.plan) return res.json({ ok: true, quota: quotaOut(quota) });   // unlimited plan
-  const key = "open:" + String(req.body?.key || "").slice(0, 120);
-  if (key === (quota.last_q || "")) return res.json({ ok: true, quota: quotaOut(quota) });
+  // Opening a product also kicks a background live re-scrape (fire-and-forget).
+  const allow = () => { kickLiveRefresh(category, productId); res.json({ ok: true, quota: quotaOut(quota) }); };
+
+  if (quota.unlimited) return allow();                       // active plan w/ unlimited views
+  if (key === (quota.last_q || "")) return allow();          // same product again — free, still refresh
   if (quota.remaining <= 0)
     return res.status(403).json({ error: "Free views used up", need: quota.need, quota: quotaOut(quota) });
   await bump(req, quota, key); quota.used += 1; quota.remaining -= 1;
-  res.json({ ok: true, quota: quotaOut(quota) });
+  allow();
 }));
 
 // ============================================================ OTP mobile auth
@@ -189,11 +250,21 @@ authR.post("/complete-profile", requireAuth, asyncH(async (req, res) => {
 const planR = Router();
 planR.use(requireAuth);
 
-// Start (or reuse) a pending plan payment; return the platform UPI to pay into.
+// Start (or reuse) a pending plan payment for the chosen plan; return the UPI.
 planR.post("/order", asyncH(async (req, res) => {
+  const planId = req.body?.plan_id || null;
+  const plan = planId ? await getPlan(planId) : null;
+  const amount = plan ? Number(plan.price) : 100;
+  // Free plan: grant immediately, no payment / QR.
+  if (plan && amount <= 0) {
+    await grantSearchPlan(req.user.sub, plan);
+    await query(`insert into search_plan_orders (user_id, plan_id, amount, status, paid_at) values ($1,$2,0,'paid',now())`, [req.user.sub, planId]);
+    return res.json({ granted: true, amount: 0, plan });
+  }
   let order = (await query(`select * from search_plan_orders where user_id=$1 and status in ('pending','claimed') order by created_at desc limit 1`, [req.user.sub])).rows[0];
-  if (!order) order = (await query(`insert into search_plan_orders (user_id) values ($1) returning *`, [req.user.sub])).rows[0];
-  res.json({ order, amount: Number(order.amount), upi: await getPlatformUpi() });
+  if (order) order = (await query(`update search_plan_orders set plan_id=$2, amount=$3 where id=$1 returning *`, [order.id, planId, amount])).rows[0];
+  else order = (await query(`insert into search_plan_orders (user_id, plan_id, amount) values ($1,$2,$3) returning *`, [req.user.sub, planId, amount])).rows[0];
+  res.json({ order, amount: Number(order.amount), plan, upi: await getPlatformUpi() });
 }));
 
 planR.post("/claim", asyncH(async (req, res) => {
@@ -227,12 +298,23 @@ planAdmin.post("/search-plans/:id/mark-paid", asyncH(async (req, res) => {
   if (!o) return res.status(404).json({ error: "Not found" });
   if (o.status === "paid") return res.status(400).json({ error: "Already paid" });
   await query(`update search_plan_orders set status='paid', utr=coalesce($2,utr), paid_at=now() where id=$1`, [o.id, utr]);
-  await query(
-    `update users set search_used=0,
-        search_plan_until = greatest(coalesce(search_plan_until, now()), now()) + interval '30 days'
-      where id=$1`, [o.user_id]
-  );
+  await grantSearchPlan(o.user_id, o.plan_id ? await getPlan(o.plan_id) : null);
   res.json({ ok: true });
+}));
+
+// Admin manually assigns / upgrades a user's search plan (e.g. after confirming
+// an offline payment). Takes effect immediately. No plan_id = revoke the plan.
+planAdmin.post("/users/:userId/search-plan", asyncH(async (req, res) => {
+  const planId = req.body?.plan_id;
+  if (!planId) {
+    await query(`update users set search_plan_until = null, search_plan_views = null where id = $1`, [req.params.userId]);
+    return res.json({ ok: true, cleared: true });
+  }
+  const plan = await getPlan(planId);
+  if (!plan) return res.status(404).json({ error: "Plan not found" });
+  await grantSearchPlan(req.params.userId, plan);
+  const u = (await query(`select search_plan_until, search_plan_views from users where id=$1`, [req.params.userId])).rows[0];
+  res.json({ ok: true, until: u.search_plan_until, views: u.search_plan_views });
 }));
 
 export { pub as searchPublicRoutes, authR as searchAuthRoutes, planR as searchPlanRoutes, planAdmin as searchPlanAdminRoutes };

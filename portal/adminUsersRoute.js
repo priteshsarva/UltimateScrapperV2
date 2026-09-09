@@ -17,6 +17,7 @@ router.get("/users", async (req, res) => {
       `select
          u.id, u.email, u.name, u.role, u.status, u.created_at,
          u.mobile, u.mobile_verified, u.profile_complete,
+         u.search_plan_until, u.search_plan_views,
          u.whatsapp_number, u.whatsapp_community_url, u.social_urls,
          count(distinct e.id)                                            as shops,
          count(distinct e.id) filter (where e.status = 'active')         as active_shops,
