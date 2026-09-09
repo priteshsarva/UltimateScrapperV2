@@ -3,7 +3,7 @@
 //   app.use("/portal/admin/plans",  adminPlansRoutes)   // admin: define/edit tiers
 import { Router } from "express";
 import { requireAuth, requireAdmin } from "./auth.js";
-import { listPlans, getPlan, createPlan, updatePlan } from "./plans.js";
+import { listPlans, getPlan, createPlan, updatePlan, deletePlan } from "./plans.js";
 
 // ---- client: list active plans ----
 const clientRouter = Router();
@@ -38,6 +38,15 @@ adminRouter.patch("/:id", async (req, res) => {
     if (!plan) return res.status(404).json({ error: "Plan not found" });
     res.json({ plan });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+adminRouter.delete("/:id", async (req, res) => {
+  try { await deletePlan(req.params.id); res.json({ ok: true }); }
+  catch (e) {
+    // FK from an enrollment/invoice still on this plan → don't hard-delete.
+    if (e.code === "23503") return res.status(409).json({ error: "This plan is in use — pause it instead of deleting." });
+    res.status(500).json({ error: e.message });
+  }
 });
 
 export { clientRouter as plansRoutes, adminRouter as adminPlansRoutes };
