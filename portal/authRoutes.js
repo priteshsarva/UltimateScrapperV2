@@ -5,6 +5,7 @@ import { hashPassword, comparePassword, signToken, requireAuth } from "./auth.js
 import { generateEnrollmentKey } from "./keys.js";
 import { sendWelcomeEmail } from "./mailer.js";
 import { listPlans } from "./plans.js";
+import { logLoginAttempt } from "./activityLog.js";
 
 function normDomain(d) {
   if (!d) return "";
@@ -93,6 +94,8 @@ router.get("/plans", async (req, res) => {
 // POST /auth/login  { email, password }
 router.post("/login", async (req, res) => {
   const { email, password } = req.body || {};
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip;
+  const attempt = (extra) => logLoginAttempt({ identifier: email, method: "password", ip, ...extra });
   if (!email || !password)
     return res.status(400).json({ error: "email and password required" });
   try {
@@ -101,11 +104,12 @@ router.post("/login", async (req, res) => {
       [email]
     );
     const user = rows[0];
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
-    if (user.status === "suspended") return res.status(403).json({ error: "Account suspended" });
+    if (!user) { attempt({ success: false, reason: "no such account" }); return res.status(401).json({ error: "Invalid credentials" }); }
+    if (user.status === "suspended") { attempt({ user_id: user.id, success: false, reason: "suspended" }); return res.status(403).json({ error: "Account suspended" }); }
     const ok = await comparePassword(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+    if (!ok) { attempt({ user_id: user.id, success: false, reason: "wrong password" }); return res.status(401).json({ error: "Invalid credentials" }); }
     delete user.password_hash;
+    attempt({ user_id: user.id, success: true });
     res.json({ token: signToken(user), user });
   } catch (err) {
     console.error("login error:", err);

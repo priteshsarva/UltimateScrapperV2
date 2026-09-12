@@ -68,7 +68,7 @@ export function buildPayoutEmail(kind, { brand, amount, utr, note }) {
 export function sendCustomerOrderEmail({ to, brand, order, items, kind, contact }) {
   if (!to) return;
   const { subject, html } = buildCustomerOrderEmail(kind, { brand, order, items, contact });
-  sendMail({ to, subject, html }).catch((e) => console.error("[orderEmail]", e.message));
+  sendMail({ to, subject, html, reason: `order:${kind}`, name: order.buyer_name, mobile: order.buyer_phone }).catch((e) => console.error("[orderEmail]", e.message));
 }
 export function sendVendorOrderEmail({ to, brand, order, items, storeName, contact }) {
   if (!to) return;
@@ -96,5 +96,5 @@ export function buildPaymentReminderEmail({ brand, order, items, payUrl, contact
 export function sendPaymentReminderEmail({ to, brand, order, items, payUrl, contact }) {
   if (!to) return;
   const { subject, html } = buildPaymentReminderEmail({ brand, order, items, payUrl, contact });
-  sendMail({ to, subject, html }).catch((e) => console.error("[orderEmail] reminder:", e.message));
+  sendMail({ to, subject, html, reason: "payment_reminder", name: order.buyer_name, mobile: order.buyer_phone }).catch((e) => console.error("[orderEmail] reminder:", e.message));
 }

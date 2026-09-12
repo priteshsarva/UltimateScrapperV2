@@ -19,7 +19,7 @@ import { getPlatformUpi } from "./settings.js";
 import { verifyFirebaseIdToken } from "./firebaseAdmin.js";
 import { getPlan } from "./plans.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
-import { logCatalogue } from "./activityLog.js";
+import { logCatalogue, logLoginAttempt } from "./activityLog.js";
 
 // Fire-and-forget live re-scrape of one product when it's opened from search.
 // Guarded so public traffic can't pile onto the Puppeteer gate: per-product
@@ -211,12 +211,14 @@ const authR = Router();
 authR.post("/firebase", asyncH(async (req, res) => {
   const idToken = req.body?.idToken;
   if (!idToken) return res.status(400).json({ error: "Missing idToken" });
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip;
   let decoded;
   try { decoded = await verifyFirebaseIdToken(idToken); }
-  catch (e) { console.error("[firebase]", e.message); return res.status(401).json({ error: "Phone verification failed" }); }
+  catch (e) { console.error("[firebase]", e.message); logLoginAttempt({ method: "otp", success: false, reason: "firebase verify failed", ip }); return res.status(401).json({ error: "Phone verification failed" }); }
   const mobile = canonMobile(decoded.phone_number);
   if (!mobile) return res.status(400).json({ error: "No phone number on token" });
   const user = await findOrCreateMobileUser(mobile);
+  logLoginAttempt({ identifier: mobile, method: "otp", user_id: user.id, success: true, ip });
   res.json({ token: signToken(user), user, profile_complete: user.profile_complete });
 }));
 
@@ -234,11 +236,13 @@ authR.post("/otp/send", asyncH(async (req, res) => {
 authR.post("/otp/verify", asyncH(async (req, res) => {
   const mobile = canonMobile(req.body?.mobile);
   const code = String(req.body?.code || "").trim();
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip;
   if (!mobile || !code) return res.status(400).json({ error: "Mobile and code required" });
   const row = (await query(`select 1 from otp_codes where mobile=$1 and code=$2 and expires_at > now() order by created_at desc limit 1`, [mobile, code])).rows[0];
-  if (!row) return res.status(400).json({ error: "Invalid or expired code" });
+  if (!row) { logLoginAttempt({ identifier: mobile, method: "otp", success: false, reason: "invalid code", ip }); return res.status(400).json({ error: "Invalid or expired code" }); }
   await query(`delete from otp_codes where mobile=$1`, [mobile]);
   const user = await findOrCreateMobileUser(mobile);
+  logLoginAttempt({ identifier: mobile, method: "otp", user_id: user.id, success: true, ip });
   res.json({ token: signToken(user), user, profile_complete: user.profile_complete });
 }));
 

@@ -20,3 +20,19 @@ export function logCatalogue(row = {}) {
      results_count, product_id, product_name, source_name]
   ).catch((e) => console.error("[activityLog]", e.message));
 }
+
+// Record a login attempt (password or OTP), success or failure.
+export function logLoginAttempt({ identifier = null, method = null, user_id = null, success = false, reason = null, ip = null } = {}) {
+  query(
+    `insert into login_attempts (identifier, method, user_id, success, reason, ip) values ($1,$2,$3,$4,$5,$6)`,
+    [identifier, method, user_id, !!success, reason, ip ? String(ip).slice(0, 60) : null]
+  ).catch((e) => console.error("[activityLog:login]", e.message));
+}
+
+// Record an email send (fired from mailer.sendMail for every email).
+export function logEmail({ to_email = null, to_name = null, to_mobile = null, subject = null, reason = null, success = false, error = null } = {}) {
+  query(
+    `insert into email_log (to_email, to_name, to_mobile, subject, reason, success, error) values ($1,$2,$3,$4,$5,$6,$7)`,
+    [to_email, to_name, to_mobile, subject, reason, !!success, error]
+  ).catch((e) => console.error("[activityLog:email]", e.message));
+}
