@@ -46,6 +46,10 @@ router.post("/signup", async (req, res) => {
       return res.status(400).json({ error: "Invalid plan" });
 
     const hash = await hashPassword(password);
+    // Canonical mobile (digits, 91-prefixed) so a later mobile-OTP login resolves
+    // to this same account.
+    const md = String(mobile || "").replace(/\D/g, "");
+    const canonMob = md ? (md.length === 10 ? "91" + md : md) : null;
     await client.query("BEGIN");
 
     const user = (await client.query(
@@ -53,7 +57,7 @@ router.post("/signup", async (req, res) => {
          (email, password_hash, name, role, mobile, whatsapp_number, whatsapp_community_url, social_urls)
        values ($1,$2,$3,'client',$4,$5,$6,$7)
        returning id, email, name, role, plan, status`,
-      [email, hash, name || null, mobile || null,
+      [email, hash, name || null, canonMob,
        whatsapp_number || null, whatsapp_community_url || null,
        social_urls ? JSON.stringify(social_urls) : "{}"]
     )).rows[0];

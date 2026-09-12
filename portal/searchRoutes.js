@@ -86,7 +86,15 @@ const canonMobile = (m) => { const d = String(m || "").replace(/\D/g, ""); retur
 // A verified number maps to a client account: "verified" immediately, but
 // "incomplete" until the user fills in their details.
 async function findOrCreateMobileUser(mobile) {
-  let user = (await query(`select id, email, name, role, plan, status, profile_complete from users where mobile=$1 order by created_at limit 1`, [mobile])).rows[0];
+  // Match by the last 10 digits so an EXISTING email/password user (whose mobile
+  // may be stored as "+91 98765 43210", "9876…", etc.) resolves to their real
+  // account instead of spawning a duplicate.
+  const last10 = String(mobile).replace(/\D/g, "").slice(-10);
+  let user = (await query(
+    `select id, email, name, role, plan, status, profile_complete from users
+      where regexp_replace(coalesce(mobile,''), '[^0-9]', '', 'g') like $1
+      order by created_at limit 1`, ["%" + last10]
+  )).rows[0];
   if (!user) {
     user = (await query(
       `insert into users (email, password_hash, name, role, mobile, status, mobile_verified, profile_complete)
