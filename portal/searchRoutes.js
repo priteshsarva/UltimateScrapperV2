@@ -153,7 +153,7 @@ pub.get("/sources", asyncH(async (_req, res) => {
 // Plans the admin flagged for the search landing (their own plans, live-managed).
 pub.get("/plans", asyncH(async (_req, res) => {
   const rows = (await query(
-    `select id, name, price, currency, interval, interval_count, description, features, limits
+    `select id, name, price, discount_price, currency, interval, interval_count, description, features, limits
        from plans where active = true and show_on_search = true order by sort_order, price`
   )).rows;
   res.json({ plans: rows });
@@ -265,7 +265,8 @@ planR.use(requireAuth);
 planR.post("/order", asyncH(async (req, res) => {
   const planId = req.body?.plan_id || null;
   const plan = planId ? await getPlan(planId) : null;
-  const amount = plan ? Number(plan.price) : 100;
+  const planPrice = plan ? Number(plan.discount_price != null && plan.discount_price !== "" ? plan.discount_price : plan.price) : 100;
+  const amount = planPrice;
   // Free plan: grant immediately, no payment / QR.
   if (plan && amount <= 0) {
     await grantSearchPlan(req.user.sub, plan);
