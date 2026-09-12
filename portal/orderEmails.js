@@ -3,7 +3,7 @@
 // the admin preview. Senders are fire-and-forget — a mail failure never breaks a
 // request.
 import { sendMail } from "./mailer.js";
-import { wrap, orderTable, addressBlock, money } from "./emailTemplates.js";
+import { wrap, orderTable, addressBlock, money, button } from "./emailTemplates.js";
 
 const itemsFor = (items = []) => items.map((it) => ({
   product_name: it.product_name, size: it.size, qty: it.qty,
@@ -79,4 +79,22 @@ export function sendPayoutEmail({ to, brand, kind, amount, utr, note }) {
   if (!to) return;
   const { subject, html } = buildPayoutEmail(kind, { brand, amount, utr, note });
   sendMail({ to, subject, html }).catch((e) => console.error("[payoutEmail]", e.message));
+}
+
+// "Finish paying" reminder for an order that was placed but never paid.
+export function buildPaymentReminderEmail({ brand, order, items, payUrl, contact = null }) {
+  return {
+    subject: `Finish paying order ${order.order_no}`,
+    html: wrap({
+      title: "Complete your payment", brand,
+      intro: `Your order ${order.order_no} is reserved but not confirmed yet — it just needs payment to go through.`,
+      bodyHtml: orderBody(order, items) + (payUrl ? button("Pay now", payUrl) : ""),
+      contact,
+    }),
+  };
+}
+export function sendPaymentReminderEmail({ to, brand, order, items, payUrl, contact }) {
+  if (!to) return;
+  const { subject, html } = buildPaymentReminderEmail({ brand, order, items, payUrl, contact });
+  sendMail({ to, subject, html }).catch((e) => console.error("[orderEmail] reminder:", e.message));
 }

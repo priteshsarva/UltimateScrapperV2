@@ -6,6 +6,7 @@
 import { query } from "./db.js";
 import { generateInvoiceForEnrollment } from "./billing.js";
 import { sendReminderEmail, sendMail } from "./mailer.js";
+import { sendPaymentReminderEmail } from "./orderEmails.js";
 import { notify } from "./notifications.js";
 import { reverifyListingsTick, purgeShipmentPhotosTick } from "./wholesaleCron.js";
 import { runCatalogueScan } from "./catalogueScan.js";
@@ -112,6 +113,44 @@ export async function billingTick() {
   return { renewals, reminders, expired: expired.rowCount };
 }
 
+// Daily "finish paying your order" reminder for storefront orders left unpaid.
+// Once/day per order, for 7 days, on active hosted stores with a buyer email.
+function storePayUrl(slug, orderNo) {
+  const platform = (process.env.PLATFORM_HOST || "").replace(/^\.+|\.+$/g, "");
+  if (platform) return `https://${slug}.${platform}/pay/${encodeURIComponent(orderNo)}`;
+  const dev = (process.env.STOREFRONT_DEV_URL || "http://localhost:5175").replace(/\/+$/, "");
+  return `${dev}/pay/${encodeURIComponent(orderNo)}?store=${slug}`;
+}
+export async function unpaidOrderReminderTick() {
+  const orders = (await query(
+    `select o.*, e.slug, coalesce(s.store_name, e.slug) as store_name,
+            s.email as store_email, s.phone as store_phone, s.whatsapp as store_whatsapp
+       from orders o
+       join enrollments e on e.id = o.enrollment_id
+       left join site_settings s on s.enrollment_id = e.id
+      where e.type = 'hosted' and e.status = 'active'
+        and coalesce(o.payment_status, 'unpaid') = 'unpaid'
+        and o.status <> 'cancelled'
+        and o.buyer_email is not null
+        and o.created_at >= now() - interval '7 days'
+        and (o.last_pay_reminder_at is null or o.last_pay_reminder_at < date_trunc('day', now()))`
+  )).rows;
+  let sent = 0;
+  for (const o of orders) {
+    try {
+      const items = (await query(`select * from order_items where order_id=$1`, [o.id])).rows;
+      sendPaymentReminderEmail({
+        to: o.buyer_email, brand: o.store_name, order: o, items,
+        payUrl: storePayUrl(o.slug, o.order_no),
+        contact: { email: o.store_email, phone: o.store_phone, whatsapp: o.store_whatsapp },
+      });
+      await query(`update orders set last_pay_reminder_at=now() where id=$1`, [o.id]);
+      sent++;
+    } catch (e) { console.error("[unpaid-order] reminder:", e.message); }
+  }
+  return { sent };
+}
+
 // Arm a daily run via node-cron if it's installed (npm install node-cron).
 // If not installed, call billingTick() from an external cron hitting
 // POST /portal/admin/shops/run-billing-tick instead.
@@ -140,6 +179,10 @@ export function startScheduler() {
       cron.default.schedule("15 8 * * *", () => {
         reverifyListingsTick().then((r) => console.log("[wholesale] reverify", r)).catch((e) => console.error("[wholesale] reverify:", e.message));
         purgeShipmentPhotosTick().then((r) => console.log("[wholesale] purge", r)).catch((e) => console.error("[wholesale] purge:", e.message));
+      });
+      // storefront unpaid-order reminders: once/day
+      cron.default.schedule("0 10 * * *", () => {
+        unpaidOrderReminderTick().then((r) => console.log("[unpaid-order] tick", r)).catch((e) => console.error("[unpaid-order] tick:", e.message));
       });
       console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30; wholesale maintenance at 08:15");
     })

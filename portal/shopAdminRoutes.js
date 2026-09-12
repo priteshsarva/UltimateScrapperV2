@@ -5,7 +5,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { generateInvoiceForEnrollment } from "./billing.js";
 import { sendShopApprovedEmail } from "./mailer.js";
-import { billingTick, hostedExpiryTick } from "./scheduler.js";
+import { billingTick, hostedExpiryTick, unpaidOrderReminderTick } from "./scheduler.js";
 import { runCatalogueScan } from "./catalogueScan.js";
 
 const router = Router();
@@ -53,6 +53,12 @@ router.post("/run-billing-tick", async (req, res) => {
 // manual trigger for the hosted-storefront expiry lifecycle (grace reminders + auto-pause)
 router.post("/run-hosted-expiry-tick", async (req, res) => {
   try { res.json(await hostedExpiryTick()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// manual trigger for storefront unpaid-order payment reminders
+router.post("/run-unpaid-order-reminder-tick", async (req, res) => {
+  try { res.json(await unpaidOrderReminderTick()); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 

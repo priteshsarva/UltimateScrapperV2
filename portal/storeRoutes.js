@@ -296,6 +296,14 @@ export function productPageUrl(enr, dbName, productId) {
   return `${dev}/p/${dbName}/${productId}?store=${enr.slug}`;
 }
 
+// The storefront pay page for an order (finish-payment reminders link here).
+export function storePayUrl(enr, orderNo) {
+  const platform = (process.env.PLATFORM_HOST || "").replace(/^\.+|\.+$/g, "");
+  if (platform) return `https://${enr.slug}.${platform}/pay/${encodeURIComponent(orderNo)}`;
+  const dev = (process.env.STOREFRONT_DEV_URL || "http://localhost:5175").replace(/\/+$/, "");
+  return `${dev}/pay/${encodeURIComponent(orderNo)}?store=${enr.slug}`;
+}
+
 function buildWhatsAppUrl(whatsapp, orderNo, items, total, address, storeName) {
   const inr = (n) => "₹" + Math.round(Number(n) || 0).toLocaleString("en-IN");
   const L = [];
