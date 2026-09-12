@@ -27,13 +27,12 @@ router.get("/enrollments", async (req, res) => {
 
 // POST /portal/admin/enrollments/:id/approve
 router.post("/enrollments/:id/approve", async (req, res) => {
-  const { rows } = await query(
-    `update enrollments set status='approved'
-      where id=$1 and status='pending' returning domain`,
-    [req.params.id]
-  );
-  if (!rows[0]) return res.status(409).json({ error: "Not in pending state" });
-  await audit(req.user.email, "Approved enrollment", rows[0].domain);
+  const enr = (await query(`select id, domain, type, plan_id, status from enrollments where id=$1`, [req.params.id])).rows[0];
+  if (!enr || enr.status !== "pending") return res.status(409).json({ error: "Not in pending state" });
+  // A storefront must have a plan before it can go live (plans are per-storefront).
+  if (enr.type === "hosted" && !enr.plan_id) return res.status(400).json({ error: "Assign a plan to this storefront before approving." });
+  await query(`update enrollments set status='approved' where id=$1`, [enr.id]);
+  await audit(req.user.email, "Approved enrollment", enr.domain);
   res.json({ ok: true });
 });
 

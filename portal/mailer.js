@@ -5,6 +5,7 @@
 // edit takes effect without a restart.
 import nodemailer from "nodemailer";
 import { getSmtpConfig } from "./settings.js";
+import { logEmail } from "./activityLog.js";
 
 const APP_URL = process.env.APP_URL || "http://localhost:5174";
 
@@ -25,14 +26,16 @@ async function tx() {
   return { transport, from: c.from };
 }
 
-export async function sendMail({ to, subject, html, text, from }) {
+export async function sendMail({ to, subject, html, text, from, reason, name, mobile }) {
   if (!to) return { ok: false, error: "no recipient" };
   try {
     const t = await tx();
     await t.transport.sendMail({ from: from || t.from, to, subject, html, text: text || undefined });
+    logEmail({ to_email: to, to_name: name, to_mobile: mobile, subject, reason, success: true });
     return { ok: true };
   } catch (e) {
     console.error("[mail] send failed:", e.message);
+    logEmail({ to_email: to, to_name: name, to_mobile: mobile, subject, reason, success: false, error: e.message });
     return { ok: false, error: e.message };
   }
 }

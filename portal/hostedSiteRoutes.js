@@ -24,6 +24,25 @@ import { sendCustomerOrderEmail } from "./orderEmails.js";
 // to (a) refuse a vendor claiming a platform-owned name and (b) let resolveStore
 // tell a platform subdomain from a real custom domain. Empty in local dev.
 const PLATFORM_HOST = (process.env.PLATFORM_HOST || "").toLowerCase().replace(/^\.+|\.+$/g, "");
+// Where a vendor points their own domain. Defaults to PLATFORM_HOST; set
+// CUSTOM_DOMAIN_TARGET_IP for a clean apex A-record.
+const CUSTOM_DOMAIN_TARGET = (process.env.CUSTOM_DOMAIN_TARGET || PLATFORM_HOST || "").toLowerCase().replace(/^\.+|\.+$/g, "");
+const CUSTOM_DOMAIN_TARGET_IP = process.env.CUSTOM_DOMAIN_TARGET_IP || "";
+
+// The copy-paste DNS records a vendor adds at their registrar to connect a domain.
+function dnsRecords(domain, token) {
+  const target = CUSTOM_DOMAIN_TARGET;
+  let ip = CUSTOM_DOMAIN_TARGET_IP;
+  if (!ip) { const m = /^(\d{1,3}(?:\.\d{1,3}){3})\./.exec(target); if (m) ip = m[1]; } // e.g. 43.204.135.214.sslip.io
+  const recs = [
+    { type: "TXT", host: `_spp-verify.${domain}`, value: token, note: "Verifies you own this domain" },
+    { type: "CNAME", host: "www", value: target, note: "Points www.<domain> at your storefront" },
+  ];
+  recs.push(ip
+    ? { type: "A", host: "@", value: ip, note: "Points the root domain at your storefront" }
+    : { type: "CNAME", host: "@", value: target, note: "Root domain — use an ALIAS/ANAME record if your DNS supports it" });
+  return recs;
+}
 
 function normalizeDomain(d) {
   if (!d) return null;
@@ -146,9 +165,10 @@ clientRouter.post("/hosted-sites/:id/submit", asyncH(async (req, res) => {
 clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at,
-            e.custom_domain, e.custom_domain_verified_at, e.plan_id,
-            e.payout_mode, e.fulfilment_mode,
+            e.custom_domain, e.custom_domain_verified_at, e.domain_verify_token, e.plan_id,
+            e.payout_mode, e.fulfilment_mode, e.store_gateway,
             (p.limits->>'allow_payout_routing')::boolean as allow_payout_routing,
+            (p.limits->>'allow_own_gateway')::boolean as allow_own_gateway,
             (exists (select 1 from enrollment_sources es where es.enrollment_id=e.id and es.source_id like 'ws_%')) as has_wholesale,
             s.store_name, s.logo_url, s.preview_password
        from enrollments e
@@ -158,6 +178,12 @@ clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
       order by e.created_at desc`,
     [req.user.sub]
   );
+  // Attach the copy-paste DNS records for any unverified custom domain.
+  for (const r of rows) {
+    r.dns_records = (r.custom_domain && !r.custom_domain_verified_at && r.domain_verify_token)
+      ? dnsRecords(r.custom_domain, r.domain_verify_token) : null;
+    delete r.domain_verify_token;
+  }
   res.json({ sites: rows });
 }));
 
@@ -337,6 +363,7 @@ clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
         wellknown_url: `https://${domain}/.well-known/spp-verify`,
         wellknown_value: r.domain_verify_token,
       } : null,
+      dns_records: domain ? dnsRecords(domain, r.domain_verify_token) : null,
     });
   } catch (err) {
     if (err.code === "23505") return res.status(409).json({ error: "That domain is already in use by another site" });
@@ -386,6 +413,22 @@ clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
     params
   );
   res.json({ settings: rows[0] });
+}));
+
+// Vendor (on an allow_own_gateway plan) picks their collection method:
+// 'pay0' = platform Pay0 (default), 'upi' = collect to their own UPI (direct payout).
+clientRouter.put("/hosted-sites/:id/store-gateway", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const gw = req.body?.store_gateway;
+  if (!["pay0", "upi"].includes(gw)) return res.status(400).json({ error: "bad gateway" });
+  const allowed = (await query(
+    `select (p.limits->>'allow_own_gateway')::boolean as ok from enrollments e left join plans p on p.id=e.plan_id where e.id=$1`,
+    [req.params.id]
+  )).rows[0]?.ok;
+  if (!allowed) return res.status(403).json({ error: "Your plan doesn't include using your own payment gateway." });
+  const payout = gw === "upi" ? "direct" : "platform";
+  await query(`update enrollments set store_gateway=$1, payout_mode=$2 where id=$3`, [gw, payout, req.params.id]);
+  res.json({ ok: true, store_gateway: gw, payout_mode: payout });
 }));
 
 // GET /portal/hosted-sites/:id/sources -> the product sources feeding this site.
@@ -576,13 +619,15 @@ adminRouter.use(requireAuth, requireAdmin);
 adminRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at, u.email as owner_email,
-            e.custom_domain, e.custom_domain_verified_at, e.payout_mode, e.gateway_fee_pct,
+            e.custom_domain, e.custom_domain_verified_at, e.payout_mode, e.gateway_fee_pct, e.store_gateway,
+            e.plan_id, p.name as plan_name, p.price as plan_price,
             (exists (select 1 from enrollment_sources es where es.enrollment_id=e.id and es.source_id like 'ws_%')) as has_wholesale,
             s.store_name, s.logo_url,
             (select count(*) from orders o where o.enrollment_id = e.id) as order_count
        from enrollments e
        join users u on u.id = e.user_id
        left join site_settings s on s.enrollment_id = e.id
+       left join plans p on p.id = e.plan_id
       where e.type = 'hosted'
       order by e.created_at desc`
   );

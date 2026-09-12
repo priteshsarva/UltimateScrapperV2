@@ -36,7 +36,9 @@ export async function generateInvoiceForEnrollment(enrollmentId, { periodStart }
        values ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9,$10,'pay0')
        returning *`,
       [enr.user_id, enr.id, plan.id, `${plan.name} — ${enr.domain}`,
-       plan.price, plan.currency, start, end, due, `INV-${seq}`]
+       // honour a discounted price when the plan has one (absolute, every cycle)
+       (plan.discount_price != null && plan.discount_price !== "" ? Number(plan.discount_price) : plan.price),
+       plan.currency, start, end, due, `INV-${seq}`]
     );
     return rows[0];
   } catch (e) {

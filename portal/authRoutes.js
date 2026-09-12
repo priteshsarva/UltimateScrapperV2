@@ -5,6 +5,7 @@ import { hashPassword, comparePassword, signToken, requireAuth } from "./auth.js
 import { generateEnrollmentKey } from "./keys.js";
 import { sendWelcomeEmail } from "./mailer.js";
 import { listPlans } from "./plans.js";
+import { logLoginAttempt } from "./activityLog.js";
 
 function normDomain(d) {
   if (!d) return "";
@@ -46,6 +47,10 @@ router.post("/signup", async (req, res) => {
       return res.status(400).json({ error: "Invalid plan" });
 
     const hash = await hashPassword(password);
+    // Canonical mobile (digits, 91-prefixed) so a later mobile-OTP login resolves
+    // to this same account.
+    const md = String(mobile || "").replace(/\D/g, "");
+    const canonMob = md ? (md.length === 10 ? "91" + md : md) : null;
     await client.query("BEGIN");
 
     const user = (await client.query(
@@ -53,7 +58,7 @@ router.post("/signup", async (req, res) => {
          (email, password_hash, name, role, mobile, whatsapp_number, whatsapp_community_url, social_urls)
        values ($1,$2,$3,'client',$4,$5,$6,$7)
        returning id, email, name, role, plan, status`,
-      [email, hash, name || null, mobile || null,
+      [email, hash, name || null, canonMob,
        whatsapp_number || null, whatsapp_community_url || null,
        social_urls ? JSON.stringify(social_urls) : "{}"]
     )).rows[0];
@@ -89,6 +94,8 @@ router.get("/plans", async (req, res) => {
 // POST /auth/login  { email, password }
 router.post("/login", async (req, res) => {
   const { email, password } = req.body || {};
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip;
+  const attempt = (extra) => logLoginAttempt({ identifier: email, method: "password", ip, ...extra });
   if (!email || !password)
     return res.status(400).json({ error: "email and password required" });
   try {
@@ -97,11 +104,12 @@ router.post("/login", async (req, res) => {
       [email]
     );
     const user = rows[0];
-    if (!user) return res.status(401).json({ error: "Invalid credentials" });
-    if (user.status === "suspended") return res.status(403).json({ error: "Account suspended" });
+    if (!user) { attempt({ success: false, reason: "no such account" }); return res.status(401).json({ error: "Invalid credentials" }); }
+    if (user.status === "suspended") { attempt({ user_id: user.id, success: false, reason: "suspended" }); return res.status(403).json({ error: "Account suspended" }); }
     const ok = await comparePassword(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+    if (!ok) { attempt({ user_id: user.id, success: false, reason: "wrong password" }); return res.status(401).json({ error: "Invalid credentials" }); }
     delete user.password_hash;
+    attempt({ user_id: user.id, success: true });
     res.json({ token: signToken(user), user });
   } catch (err) {
     console.error("login error:", err);

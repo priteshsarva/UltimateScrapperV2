@@ -19,6 +19,7 @@ import { getPlatformUpi } from "./settings.js";
 import { verifyFirebaseIdToken } from "./firebaseAdmin.js";
 import { getPlan } from "./plans.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
+import { logCatalogue, logLoginAttempt } from "./activityLog.js";
 
 // Fire-and-forget live re-scrape of one product when it's opened from search.
 // Guarded so public traffic can't pile onto the Puppeteer gate: per-product
@@ -85,7 +86,15 @@ const canonMobile = (m) => { const d = String(m || "").replace(/\D/g, ""); retur
 // A verified number maps to a client account: "verified" immediately, but
 // "incomplete" until the user fills in their details.
 async function findOrCreateMobileUser(mobile) {
-  let user = (await query(`select id, email, name, role, plan, status, profile_complete from users where mobile=$1 order by created_at limit 1`, [mobile])).rows[0];
+  // Match by the last 10 digits so an EXISTING email/password user (whose mobile
+  // may be stored as "+91 98765 43210", "9876…", etc.) resolves to their real
+  // account instead of spawning a duplicate.
+  const last10 = String(mobile).replace(/\D/g, "").slice(-10);
+  let user = (await query(
+    `select id, email, name, role, plan, status, profile_complete from users
+      where regexp_replace(coalesce(mobile,''), '[^0-9]', '', 'g') like $1
+      order by created_at limit 1`, ["%" + last10]
+  )).rows[0];
   if (!user) {
     user = (await query(
       `insert into users (email, password_hash, name, role, mobile, status, mobile_verified, profile_complete)
@@ -152,7 +161,7 @@ pub.get("/sources", asyncH(async (_req, res) => {
 // Plans the admin flagged for the search landing (their own plans, live-managed).
 pub.get("/plans", asyncH(async (_req, res) => {
   const rows = (await query(
-    `select id, name, price, currency, interval, interval_count, description, features, limits
+    `select id, name, price, discount_price, currency, interval, interval_count, description, features, limits
        from plans where active = true and show_on_search = true order by sort_order, price`
   )).rows;
   res.json({ plans: rows });
@@ -162,6 +171,12 @@ pub.get("/catalogue", asyncH(async (req, res) => {
   // Searching + browsing are free; only opening a product (POST /consume) counts.
   const quota = await getQuota(req);
   const out = await searchCatalogue(req.query);
+  const q = (req.query.q || "").toString().trim();
+  if (q.length >= 2) logCatalogue({                    // record real searches (skip debounce partials)
+    event: "search", scope: "landing", user_id: req.user?.sub || null, device_id: req.headers["x-device-id"] || null,
+    q, category: req.query.category || null, results_count: out.count,
+    filters: { stock: req.query.stock, brand: req.query.brand, size: req.query.size, source: req.query.source, sort: req.query.sort },
+  });
   res.json({ ...out, quota: quotaOut(quota) });
 }));
 
@@ -172,8 +187,12 @@ pub.post("/consume", asyncH(async (req, res) => {
   const productId = String(req.body?.productId || "").slice(0, 80);
   const key = "open:" + category + ":" + productId;
   const quota = await getQuota(req);
-  // Opening a product also kicks a background live re-scrape (fire-and-forget).
-  const allow = () => { kickLiveRefresh(category, productId); res.json({ ok: true, quota: quotaOut(quota) }); };
+  // Opening a product also kicks a background live re-scrape + logs the click.
+  const allow = () => {
+    kickLiveRefresh(category, productId);
+    logCatalogue({ event: "open", scope: "landing", user_id: req.user?.sub || null, device_id: req.headers["x-device-id"] || null, category, product_id: productId });
+    res.json({ ok: true, quota: quotaOut(quota) });
+  };
 
   if (quota.unlimited) return allow();                       // active plan w/ unlimited views
   if (key === (quota.last_q || "")) return allow();          // same product again — free, still refresh
@@ -192,12 +211,14 @@ const authR = Router();
 authR.post("/firebase", asyncH(async (req, res) => {
   const idToken = req.body?.idToken;
   if (!idToken) return res.status(400).json({ error: "Missing idToken" });
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip;
   let decoded;
   try { decoded = await verifyFirebaseIdToken(idToken); }
-  catch (e) { console.error("[firebase]", e.message); return res.status(401).json({ error: "Phone verification failed" }); }
+  catch (e) { console.error("[firebase]", e.message); logLoginAttempt({ method: "otp", success: false, reason: "firebase verify failed", ip }); return res.status(401).json({ error: "Phone verification failed" }); }
   const mobile = canonMobile(decoded.phone_number);
   if (!mobile) return res.status(400).json({ error: "No phone number on token" });
   const user = await findOrCreateMobileUser(mobile);
+  logLoginAttempt({ identifier: mobile, method: "otp", user_id: user.id, success: true, ip });
   res.json({ token: signToken(user), user, profile_complete: user.profile_complete });
 }));
 
@@ -215,11 +236,13 @@ authR.post("/otp/send", asyncH(async (req, res) => {
 authR.post("/otp/verify", asyncH(async (req, res) => {
   const mobile = canonMobile(req.body?.mobile);
   const code = String(req.body?.code || "").trim();
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip;
   if (!mobile || !code) return res.status(400).json({ error: "Mobile and code required" });
   const row = (await query(`select 1 from otp_codes where mobile=$1 and code=$2 and expires_at > now() order by created_at desc limit 1`, [mobile, code])).rows[0];
-  if (!row) return res.status(400).json({ error: "Invalid or expired code" });
+  if (!row) { logLoginAttempt({ identifier: mobile, method: "otp", success: false, reason: "invalid code", ip }); return res.status(400).json({ error: "Invalid or expired code" }); }
   await query(`delete from otp_codes where mobile=$1`, [mobile]);
   const user = await findOrCreateMobileUser(mobile);
+  logLoginAttempt({ identifier: mobile, method: "otp", user_id: user.id, success: true, ip });
   res.json({ token: signToken(user), user, profile_complete: user.profile_complete });
 }));
 
@@ -254,7 +277,8 @@ planR.use(requireAuth);
 planR.post("/order", asyncH(async (req, res) => {
   const planId = req.body?.plan_id || null;
   const plan = planId ? await getPlan(planId) : null;
-  const amount = plan ? Number(plan.price) : 100;
+  const planPrice = plan ? Number(plan.discount_price != null && plan.discount_price !== "" ? plan.discount_price : plan.price) : 100;
+  const amount = planPrice;
   // Free plan: grant immediately, no payment / QR.
   if (plan && amount <= 0) {
     await grantSearchPlan(req.user.sub, plan);

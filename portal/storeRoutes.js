@@ -20,8 +20,10 @@ import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer
 import { sendCustomerOrderEmail, sendVendorOrderEmail } from "./orderEmails.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
 import { applyBrandToRows, rawBrandsFor, canonicalBrand, subBrandsFor, rawBrandsForSub, brandInfo, primaryBrandSet } from "./brandMap.js";
-import { getPlatformUpi } from "./settings.js";
+import { getPlatformUpi, getActiveProvider } from "./settings.js";
 import { notify as notifyFeed } from "./notifications.js";
+import { createOrder as pay0CreateOrder, checkStatus as pay0CheckStatus } from "./pay0.js";
+import { verifyOrderPayment } from "./orderVerify.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FOLDER = path.resolve(__dirname, "../databases");
@@ -42,6 +44,9 @@ const MAX_INFLIGHT = Math.max(1, parseInt(process.env.REFRESH_MAX_INFLIGHT, 10) 
 const STOREFRONT_STALE_MS = Math.max(60 * 1000, parseInt(process.env.STOREFRONT_STALE_MS, 10) || 60 * 60 * 1000);
 
 const router = Router();
+// Literal gateway-callback router, mounted at /store BEFORE the main /:slug
+// router so the path can't be swallowed by /:slug.
+const gatewayRouter = Router();
 
 // wraps an async handler so a thrown/rejected error becomes clean 500 JSON
 // instead of an unhandled rejection (same pattern as enrollmentSourceRoutes.js)
@@ -296,6 +301,14 @@ export function productPageUrl(enr, dbName, productId) {
   return `${dev}/p/${dbName}/${productId}?store=${enr.slug}`;
 }
 
+// The storefront pay page for an order (finish-payment reminders link here).
+export function storePayUrl(enr, orderNo) {
+  const platform = (process.env.PLATFORM_HOST || "").replace(/^\.+|\.+$/g, "");
+  if (platform) return `https://${enr.slug}.${platform}/pay/${encodeURIComponent(orderNo)}`;
+  const dev = (process.env.STOREFRONT_DEV_URL || "http://localhost:5175").replace(/\/+$/, "");
+  return `${dev}/pay/${encodeURIComponent(orderNo)}?store=${enr.slug}`;
+}
+
 function buildWhatsAppUrl(whatsapp, orderNo, items, total, address, storeName) {
   const inr = (n) => "₹" + Math.round(Number(n) || 0).toLocaleString("en-IN");
   const L = [];
@@ -333,10 +346,18 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
   // Payment: platform-mode stores collect to the PLATFORM UPI (admin verifies);
   // direct-mode stores collect to their OWN UPI (vendor verifies). The screenshot
   // always goes to the store's WhatsApp either way.
-  const payoutMode = (await query(`select payout_mode from enrollments where id=$1`, [enr.id])).rows[0]?.payout_mode || "platform";
+  const enrRow = (await query(`select payout_mode, store_gateway from enrollments where id=$1`, [enr.id])).rows[0] || {};
+  const payoutMode = enrRow.payout_mode || "platform";
   const platformUpi = payoutMode === "platform" ? await getPlatformUpi() : null;
+  // Effective collector: 'pay0' only when the site is set to it AND Pay0 is
+  // actually configured; otherwise fall back to the manual UPI/WhatsApp flow.
+  let method = "upi";
+  if ((enrRow.store_gateway || "pay0") === "pay0") {
+    try { if ((await getActiveProvider()).enabled) method = "pay0"; } catch { /* stay upi */ }
+  }
   const payment = {
     mode: payoutMode,
+    method,
     upi_id: payoutMode === "platform" ? (platformUpi.upi_id || null) : (site.upi_id || null),
     upi_name: payoutMode === "platform" ? (platformUpi.upi_name || null) : (site.upi_name || null),
     whatsapp: site.whatsapp || null,
@@ -411,7 +432,7 @@ router.post("/:slug/preview-unlock", resolveStore, asyncH(async (req, res) => {
 // POST /:slug/track  { event, product_id?, db_name?, value?, session_id?, meta? }
 // First-party analytics beacon. Fire-and-forget from the storefront. Only live
 // stores are recorded — preview views would skew a vendor's numbers.
-const TRACK_EVENTS = new Set(["page_view", "view_item", "add_to_cart", "begin_checkout", "search"]);
+const TRACK_EVENTS = new Set(["page_view", "view_item", "add_to_cart", "begin_checkout", "search", "purchase"]);
 router.post("/:slug/track", resolveStore, asyncH(async (req, res) => {
   if (!req.storeIsLive) return res.json({ ok: true, skipped: true });
   const { event, product_id, db_name, value, session_id, meta } = req.body || {};
@@ -1208,6 +1229,49 @@ router.post("/:slug/orders/:orderNo/claim", resolveStore, asyncH(async (req, res
   res.json({ ok: true });
 }));
 
+// A vendor's OWN Pay0 creds when their plan allows it and they've configured
+// them; otherwise null → the platform's Pay0 account collects (and takes the fee).
+async function gatewayCredsFor(enrId) {
+  const r = (await query(
+    `select e.gateway_config, (p.limits->>'allow_own_gateway')::boolean as allow_own
+       from enrollments e left join plans p on p.id = e.plan_id where e.id=$1`, [enrId]
+  )).rows[0] || {};
+  if (r.allow_own && r.gateway_config && r.gateway_config.user_token) return r.gateway_config;
+  return null;
+}
+
+// Start a Pay0 gateway payment for an order → { payment_url } to redirect to.
+router.post("/:slug/orders/:orderNo/pay-start", resolveStore, asyncH(async (req, res) => {
+  const enr = req.storeEnrollment;
+  const o = (await query(
+    `select id, order_no, total, buyer_phone, payment_status from orders where enrollment_id=$1 and order_no=$2`,
+    [enr.id, req.params.orderNo]
+  )).rows[0];
+  if (!o) return res.status(404).json({ error: "Order not found" });
+  if (["claimed", "verified"].includes(o.payment_status)) return res.status(400).json({ error: "This order is already paid." });
+  const SELF = (process.env.SELF_URL || process.env.SERVER_URL || `https://${req.get("host")}`).replace(/\/+$/, "");
+  const r = await pay0CreateOrder({
+    amount: Number(o.total), orderId: `SO-${o.id}`, customerMobile: o.buyer_phone || "",
+    redirectUrl: `${SELF}/store/pay0/callback?order=${o.id}`, remark: `${enr.slug} ${o.order_no}`,
+    creds: await gatewayCredsFor(enr.id),
+  });
+  if (!r.ok || !r.payment_url) return res.status(502).json({ error: r.message || "Could not start the payment." });
+  await query(`update orders set gateway_order_id=$2, gateway_payment_url=$3, channel='gateway' where id=$1`, [o.id, r.order_id, r.payment_url]);
+  res.json({ payment_url: r.payment_url });
+}));
+
+// SPA poll after returning from the gateway: verify on success.
+router.get("/:slug/orders/:orderNo/pay-verify", resolveStore, asyncH(async (req, res) => {
+  const enr = req.storeEnrollment;
+  const o = (await query(`select id, gateway_order_id, payment_status from orders where enrollment_id=$1 and order_no=$2`, [enr.id, req.params.orderNo])).rows[0];
+  if (!o) return res.status(404).json({ error: "Order not found" });
+  if (o.payment_status === "verified") return res.json({ paid: true });
+  if (!o.gateway_order_id) return res.json({ paid: false });
+  const st = await pay0CheckStatus(o.gateway_order_id, await gatewayCredsFor(enr.id));
+  if (st.paid) { await verifyOrderPayment(o.id, { utr: st.utr }); return res.json({ paid: true }); }
+  res.json({ paid: false });
+}));
+
 router.get("/:slug/me/orders", resolveStore, identifyCustomer, requireCustomer, asyncH(async (req, res) => {
   const { rows } = await query(
     `select id, order_no, status, payment_status, subtotal, total, created_at from orders
@@ -1227,4 +1291,20 @@ router.get("/:slug/me/orders/:orderNo", resolveStore, identifyCustomer, requireC
   res.json({ order, items });
 }));
 
+// Pay0 redirects the buyer here after payment; verify + bounce to the store.
+gatewayRouter.get("/pay0/callback", asyncH(async (req, res) => {
+  const id = req.query.order;
+  const o = id ? (await query(
+    `select o.id, o.order_no, o.gateway_order_id, o.payment_status, o.enrollment_id, e.slug
+       from orders o join enrollments e on e.id = o.enrollment_id where o.id=$1`, [id]
+  )).rows[0] : null;
+  if (!o) return res.redirect("/");
+  if (o.payment_status !== "verified" && o.gateway_order_id) {
+    try { const st = await pay0CheckStatus(o.gateway_order_id, await gatewayCredsFor(o.enrollment_id)); if (st.paid) await verifyOrderPayment(o.id, { utr: st.utr }); }
+    catch (e) { console.error("[pay0 callback]", e.message); }
+  }
+  res.redirect(storePayUrl({ slug: o.slug }, o.order_no));
+}));
+
+export { gatewayRouter };
 export default router;

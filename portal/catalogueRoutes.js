@@ -8,6 +8,7 @@
 import { Router } from "express";
 import { requireAuth } from "./auth.js";
 import { searchCatalogue } from "./catalogueSearch.js";
+import { logCatalogue } from "./activityLog.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -15,11 +16,29 @@ router.use(requireAuth);
 // GET /portal/catalogue?q=&category=&page=&limit=&stock=&size=&brand=&source=&sort=&price_min=&price_max=
 router.get("/catalogue", async (req, res) => {
   try {
-    res.json(await searchCatalogue(req.query));
+    const out = await searchCatalogue(req.query);
+    const q = (req.query.q || "").toString().trim();
+    if (q.length >= 2) logCatalogue({
+      event: "search", scope: "vendor", user_id: req.user.sub,
+      q, category: req.query.category || null, results_count: out.count,
+      filters: { stock: req.query.stock, brand: req.query.brand, size: req.query.size, source: req.query.source, sort: req.query.sort },
+    });
+    res.json(out);
   } catch (e) {
     console.error("[catalogue]", e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// Vendor clicked a product in the research tool — record which one (fire-and-forget).
+router.post("/catalogue/click", (req, res) => {
+  const b = req.body || {};
+  logCatalogue({
+    event: "open", scope: "vendor", user_id: req.user.sub,
+    category: b.category || null, product_id: b.productId ? String(b.productId).slice(0, 80) : null,
+    product_name: b.name ? String(b.name).slice(0, 300) : null, source_name: b.source ? String(b.source).slice(0, 120) : null,
+  });
+  res.json({ ok: true });
 });
 
 export default router;

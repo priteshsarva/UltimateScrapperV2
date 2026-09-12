@@ -4,7 +4,7 @@
 // allow_payout_routing).
 import { query } from "./db.js";
 
-const FIELDS = ["name", "price", "currency", "interval", "interval_count", "description", "active", "sort_order", "kind", "show_on_search"];
+const FIELDS = ["name", "price", "discount_price", "currency", "interval", "interval_count", "description", "active", "sort_order", "kind", "show_on_search"];
 
 // Normalize the array/json columns before they hit pg.
 const asFeatures = (v) => Array.isArray(v) ? v.map((s) => String(s).trim()).filter(Boolean)
@@ -22,16 +22,16 @@ export async function getPlan(id) {
 
 export async function createPlan(p) {
   const {
-    name, price,
+    name, price, discount_price = null,
     currency = "INR", interval = "month", interval_count = 1,
     description = null, active = true, sort_order = 0, kind = "retail",
     show_on_search = false, features, limits,
   } = p;
   return (await query(
-    `insert into plans (name, price, currency, interval, interval_count, description, active, sort_order, kind, show_on_search, features, limits)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    `insert into plans (name, price, discount_price, currency, interval, interval_count, description, active, sort_order, kind, show_on_search, features, limits)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      returning *`,
-    [name, price, currency, interval, interval_count, description, active, sort_order, kind, show_on_search, asFeatures(features), asLimits(limits)]
+    [name, price, (discount_price === "" ? null : discount_price), currency, interval, interval_count, description, active, sort_order, kind, show_on_search, asFeatures(features), asLimits(limits)]
   )).rows[0];
 }
 
