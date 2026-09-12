@@ -57,7 +57,7 @@ import adminUsersRoutes from "./portal/adminUsersRoute.js";
 import dbMaintenanceRoutes from "./portal/dbMaintenanceRoutes.js";
 import archiveRoutes from "./portal/archiveRoutes.js";
 import { sppSyncLogger } from './spp-sync-logger.js';
-import storeRoutes from "./portal/storeRoutes.js";
+import storeRoutes, { gatewayRouter as storeGatewayRouter } from "./portal/storeRoutes.js";
 import catalogueRoutes from "./portal/catalogueRoutes.js";
 import { searchPublicRoutes, searchAuthRoutes, searchPlanRoutes, searchPlanAdminRoutes } from "./portal/searchRoutes.js";
 import adminLogsRoutes from "./portal/adminLogsRoutes.js";
@@ -217,6 +217,7 @@ app.use("/portal/admin", brandMapRoutes);                // brand-map + /brands 
 app.use("/portal/admin/db", dbMaintenanceRoutes);        // health / repair (admin)
 app.use("/portal", archiveRoutes);                       // archive-stale (NO auth, ?confirm=yes)
 app.use("/portal", publicSettingsRoutes);                // GET /portal/payment-info (non-secret)
+app.use("/store", storeGatewayRouter);                   // public: /store/pay0/callback (before /:slug)
 app.use("/store", storeRoutes);                          // public: /store/:slug/* hosted storefronts
 app.use("/portal", hostedSiteRoutes);                     // vendor: /portal/hosted-sites...
 app.use("/portal", catalogueRoutes);                      // vendor: /portal/catalogue (research)

@@ -166,8 +166,9 @@ clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at,
             e.custom_domain, e.custom_domain_verified_at, e.domain_verify_token, e.plan_id,
-            e.payout_mode, e.fulfilment_mode,
+            e.payout_mode, e.fulfilment_mode, e.store_gateway,
             (p.limits->>'allow_payout_routing')::boolean as allow_payout_routing,
+            (p.limits->>'allow_own_gateway')::boolean as allow_own_gateway,
             (exists (select 1 from enrollment_sources es where es.enrollment_id=e.id and es.source_id like 'ws_%')) as has_wholesale,
             s.store_name, s.logo_url, s.preview_password
        from enrollments e
@@ -414,6 +415,22 @@ clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   res.json({ settings: rows[0] });
 }));
 
+// Vendor (on an allow_own_gateway plan) picks their collection method:
+// 'pay0' = platform Pay0 (default), 'upi' = collect to their own UPI (direct payout).
+clientRouter.put("/hosted-sites/:id/store-gateway", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const gw = req.body?.store_gateway;
+  if (!["pay0", "upi"].includes(gw)) return res.status(400).json({ error: "bad gateway" });
+  const allowed = (await query(
+    `select (p.limits->>'allow_own_gateway')::boolean as ok from enrollments e left join plans p on p.id=e.plan_id where e.id=$1`,
+    [req.params.id]
+  )).rows[0]?.ok;
+  if (!allowed) return res.status(403).json({ error: "Your plan doesn't include using your own payment gateway." });
+  const payout = gw === "upi" ? "direct" : "platform";
+  await query(`update enrollments set store_gateway=$1, payout_mode=$2 where id=$3`, [gw, payout, req.params.id]);
+  res.json({ ok: true, store_gateway: gw, payout_mode: payout });
+}));
+
 // GET /portal/hosted-sites/:id/sources -> the product sources feeding this site.
 //   { available: [{id,name,category}], attached: [id...], categories: [db...] }
 // `available` is every active source the vendor can pick from; `attached` is the
@@ -602,7 +619,7 @@ adminRouter.use(requireAuth, requireAdmin);
 adminRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at, u.email as owner_email,
-            e.custom_domain, e.custom_domain_verified_at, e.payout_mode, e.gateway_fee_pct,
+            e.custom_domain, e.custom_domain_verified_at, e.payout_mode, e.gateway_fee_pct, e.store_gateway,
             e.plan_id, p.name as plan_name, p.price as plan_price,
             (exists (select 1 from enrollment_sources es where es.enrollment_id=e.id and es.source_id like 'ws_%')) as has_wholesale,
             s.store_name, s.logo_url,

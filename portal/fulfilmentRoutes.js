@@ -156,10 +156,17 @@ adminRouter.patch("/hosted-sites/:id/fees", asyncH(async (req, res) => {
   const b = req.body || {};
   const sets = [], params = [];
   if ("gateway_fee_pct" in b) { params.push(b.gateway_fee_pct === "" || b.gateway_fee_pct == null ? null : Number(b.gateway_fee_pct)); sets.push(`gateway_fee_pct=$${params.length}`); }
-  if (b.payout_mode && ["direct", "platform"].includes(b.payout_mode)) { params.push(b.payout_mode); sets.push(`payout_mode=$${params.length}`); }
+  let payoutMode = b.payout_mode;
+  // Pay0 collects into the PLATFORM account → the vendor's cut must be held +
+  // paid out (platform payout mode). Force it when switching a site to Pay0.
+  if (b.store_gateway && ["pay0", "upi"].includes(b.store_gateway)) {
+    params.push(b.store_gateway); sets.push(`store_gateway=$${params.length}`);
+    if (b.store_gateway === "pay0") payoutMode = "platform";
+  }
+  if (payoutMode && ["direct", "platform"].includes(payoutMode)) { params.push(payoutMode); sets.push(`payout_mode=$${params.length}`); }
   if (!sets.length) return res.status(400).json({ error: "nothing to update" });
   params.push(req.params.id);
-  const row = (await query(`update enrollments set ${sets.join(", ")} where id=$${params.length} returning id, gateway_fee_pct, payout_mode`, params)).rows[0];
+  const row = (await query(`update enrollments set ${sets.join(", ")} where id=$${params.length} returning id, gateway_fee_pct, payout_mode, store_gateway`, params)).rows[0];
   res.json({ ok: true, enrollment: row });
 }));
 adminRouter.post("/orders/:id/refund", asyncH(async (req, res) => {

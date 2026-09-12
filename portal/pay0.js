@@ -22,8 +22,8 @@ async function post(path, params, baseUrl) {
 function truthy(v) { return v === true || String(v).toLowerCase() === "true" || String(v) === "1"; }
 
 // create an order -> { ok, order_id, payment_url, message, raw }
-export async function createOrder({ amount, orderId, customerMobile, redirectUrl, remark }) {
-  const cfg = await getPaymentConfig();
+export async function createOrder({ amount, orderId, customerMobile, redirectUrl, remark, creds }) {
+  const cfg = (creds && creds.user_token) ? creds : await getPaymentConfig();
   const res = await post("/create-order", {
     customer_mobile: customerMobile || "",
     user_token: cfg.user_token,
@@ -45,8 +45,8 @@ export async function createOrder({ amount, orderId, customerMobile, redirectUrl
 }
 
 // check an order's status -> { paid, status, utr, amount, raw }
-export async function checkStatus(orderId) {
-  const cfg = await getPaymentConfig();
+export async function checkStatus(orderId, creds) {
+  const cfg = (creds && creds.user_token) ? creds : await getPaymentConfig();
   const res = await post("/check-order-status", { user_token: cfg.user_token, order_id: orderId }, cfg.base_url);
   const result = res.result || res.data || {};
   const st = String(result.txnStatus || result.status || result.order_status || "").toUpperCase();
