@@ -19,6 +19,7 @@ import { getPlatformUpi } from "./settings.js";
 import { verifyFirebaseIdToken } from "./firebaseAdmin.js";
 import { getPlan } from "./plans.js";
 import { findProduct, isStale, rescrape } from "../core/refreshProduct.js";
+import { logCatalogue } from "./activityLog.js";
 
 // Fire-and-forget live re-scrape of one product when it's opened from search.
 // Guarded so public traffic can't pile onto the Puppeteer gate: per-product
@@ -162,6 +163,12 @@ pub.get("/catalogue", asyncH(async (req, res) => {
   // Searching + browsing are free; only opening a product (POST /consume) counts.
   const quota = await getQuota(req);
   const out = await searchCatalogue(req.query);
+  const q = (req.query.q || "").toString().trim();
+  if (q.length >= 2) logCatalogue({                    // record real searches (skip debounce partials)
+    event: "search", scope: "landing", user_id: req.user?.sub || null, device_id: req.headers["x-device-id"] || null,
+    q, category: req.query.category || null, results_count: out.count,
+    filters: { stock: req.query.stock, brand: req.query.brand, size: req.query.size, source: req.query.source, sort: req.query.sort },
+  });
   res.json({ ...out, quota: quotaOut(quota) });
 }));
 
@@ -172,8 +179,12 @@ pub.post("/consume", asyncH(async (req, res) => {
   const productId = String(req.body?.productId || "").slice(0, 80);
   const key = "open:" + category + ":" + productId;
   const quota = await getQuota(req);
-  // Opening a product also kicks a background live re-scrape (fire-and-forget).
-  const allow = () => { kickLiveRefresh(category, productId); res.json({ ok: true, quota: quotaOut(quota) }); };
+  // Opening a product also kicks a background live re-scrape + logs the click.
+  const allow = () => {
+    kickLiveRefresh(category, productId);
+    logCatalogue({ event: "open", scope: "landing", user_id: req.user?.sub || null, device_id: req.headers["x-device-id"] || null, category, product_id: productId });
+    res.json({ ok: true, quota: quotaOut(quota) });
+  };
 
   if (quota.unlimited) return allow();                       // active plan w/ unlimited views
   if (key === (quota.last_q || "")) return allow();          // same product again — free, still refresh
