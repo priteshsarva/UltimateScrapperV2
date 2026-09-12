@@ -167,6 +167,7 @@ clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at,
             e.custom_domain, e.custom_domain_verified_at, e.domain_verify_token, e.plan_id,
             e.payout_mode, e.fulfilment_mode, e.store_gateway,
+            p.name as plan_name, p.limits as plan_limits,
             (p.limits->>'allow_payout_routing')::boolean as allow_payout_routing,
             (p.limits->>'allow_own_gateway')::boolean as allow_own_gateway,
             (exists (select 1 from enrollment_sources es where es.enrollment_id=e.id and es.source_id like 'ws_%')) as has_wholesale,
