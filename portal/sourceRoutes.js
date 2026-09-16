@@ -1,7 +1,7 @@
 // /portal/admin/sources/*  — admin control over the scrape registry.
 import { Router } from "express";
 import { requireAuth, requireAdmin } from "./auth.js";
-import { listSources, getSource, upsertSource, setSourceStatus } from "./sources.js";
+import { listSources, getSource, upsertSource, setSourceStatus, deleteSource } from "./sources.js";
 
 const router = Router();
 router.use(requireAuth, requireAdmin);
@@ -30,6 +30,18 @@ router.patch("/:id", async (req, res) => {
   if (req.body.status) await setSourceStatus(req.params.id, req.body.status);
   const merged = { ...cur, ...req.body, id: req.params.id };
   res.json({ source: await upsertSource(merged) });
+});
+
+// DELETE /portal/admin/sources/:id  — remove from the registry (blocked if in use)
+router.delete("/:id", async (req, res) => {
+  const cur = await getSource(req.params.id);
+  if (!cur) return res.status(404).json({ error: "Not found" });
+  try {
+    await deleteSource(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 export default router;

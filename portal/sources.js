@@ -49,6 +49,25 @@ export async function upsertSource(s) {
   return rows[0];
 }
 
+// Remove a source from the registry. Blocked while it's attached to any store
+// (enrollment_sources or the legacy enrollments.source_id) — the FK has no
+// cascade, and silently detaching live stores would break their catalogues.
+// source_categories rows cascade-delete on their own. Admin can pause instead.
+export async function deleteSource(id) {
+  const uses = Number((await query(
+    `select (select count(*) from enrollment_sources where source_id=$1)
+          + (select count(*) from enrollments where source_id=$1) as n`,
+    [id]
+  )).rows[0]?.n || 0);
+  if (uses > 0) {
+    const e = new Error(`This source is attached to ${uses} storefront(s). Remove it from them (or pause it) before deleting.`);
+    e.status = 409;
+    throw e;
+  }
+  await query(`delete from sources where id=$1`, [id]);
+  return true;
+}
+
 export async function setSourceStatus(id, status) {
   const { rows } = await query(
     `update sources set status=$1 where id=$2 returning *`,
