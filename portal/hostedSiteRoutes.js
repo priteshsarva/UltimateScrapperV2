@@ -18,6 +18,7 @@ import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOrigi
 import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
 import { sendMail } from "./mailer.js";
 import { sendCustomerOrderEmail } from "./orderEmails.js";
+import { cfConfigured, createCustomHostname, getCustomHostname, deleteCustomHostname, dnsRecordsFor, isActive, statusOf } from "./cloudflareSaas.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -340,49 +341,85 @@ clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
     if (!isHostname(domain)) return res.status(400).json({ error: "That doesn't look like a valid domain." });
     if (isPlatformDomain(domain)) return res.status(400).json({ error: "You can't claim a platform domain." });
   }
-  // a new/changed domain gets a fresh secret; clearing removes it
-  const token = domain ? "spp-verify-" + crypto.randomBytes(16).toString("hex") : null;
+
+  const cur = (await query(
+    `select custom_domain, custom_hostname_id from enrollments where id=$1 and type='hosted'`,
+    [req.params.id]
+  )).rows[0] || {};
+
+  // Retire the old Cloudflare Custom Hostname when the domain changes or is cleared.
+  if (cur.custom_hostname_id && (!domain || domain !== cur.custom_domain) && cfConfigured()) {
+    await deleteCustomHostname(cur.custom_hostname_id);
+  }
+
+  let dns_records = null, hostnameId = null, token = null, status = null;
+  if (domain) {
+    if (cfConfigured()) {
+      // reuse the existing Custom Hostname if the domain is unchanged, else create one
+      let ch;
+      if (domain === cur.custom_domain && cur.custom_hostname_id) {
+        ch = await getCustomHostname(cur.custom_hostname_id).catch(() => null);
+      }
+      if (!ch) ch = await createCustomHostname(domain);
+      hostnameId = ch.id;
+      dns_records = dnsRecordsFor(domain, ch);
+      status = statusOf(ch);
+    } else {
+      // legacy self-verify fallback (dev / Cloudflare-for-SaaS not configured)
+      token = "spp-verify-" + crypto.randomBytes(16).toString("hex");
+      dns_records = dnsRecords(domain, token);
+    }
+  }
 
   try {
-    const { rows } = await query(
+    await query(
       `update enrollments
-          set custom_domain = $1,
-              custom_domain_verified_at = null,
-              domain_verify_token = $2
-        where id = $3 and type = 'hosted'
-        returning custom_domain, custom_domain_verified_at, domain_verify_token`,
-      [domain, token, req.params.id]
+          set custom_domain = $1, custom_domain_verified_at = null,
+              custom_hostname_id = $2, domain_verify_token = $3
+        where id = $4 and type = 'hosted'`,
+      [domain, hostnameId, token, req.params.id]
     );
-    const r = rows[0] || {};
-    res.json({
-      ok: true,
-      ...r,
-      // instructions the portal shows the vendor
-      verify: domain ? {
-        txt_name: `_spp-verify.${domain}`,
-        txt_value: r.domain_verify_token,
-        wellknown_url: `https://${domain}/.well-known/spp-verify`,
-        wellknown_value: r.domain_verify_token,
-      } : null,
-      dns_records: domain ? dnsRecords(domain, r.domain_verify_token) : null,
-    });
   } catch (err) {
-    if (err.code === "23505") return res.status(409).json({ error: "That domain is already in use by another site" });
+    if (err.code === "23505") {
+      if (hostnameId && cfConfigured()) await deleteCustomHostname(hostnameId); // roll back the CF record
+      return res.status(409).json({ error: "That domain is already in use by another site" });
+    }
     throw err;
   }
+  res.json({ ok: true, custom_domain: domain, dns_records, status });
 }));
 
-// POST /portal/hosted-sites/:id/verify-domain — vendor self-verify (they own DNS)
+// POST /portal/hosted-sites/:id/verify-domain — check status (safe to poll).
+// Returns 200 always with { verified, status, dns_records } so the portal can
+// show progress (DNS → cert → live); flips custom_domain_verified_at once live.
 clientRouter.post("/hosted-sites/:id/verify-domain", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const enr = (await query(
-    `select id, custom_domain, domain_verify_token from enrollments where id=$1`,
+    `select id, custom_domain, custom_hostname_id, domain_verify_token from enrollments where id=$1`,
     [req.params.id]
   )).rows[0];
+  if (!enr?.custom_domain) return res.json({ verified: false, note: "No domain set." });
+
+  if (cfConfigured() && enr.custom_hostname_id) {
+    const ch = await getCustomHostname(enr.custom_hostname_id).catch(() => null);
+    if (!ch) return res.json({ verified: false, note: "Domain record not found — re-save the domain." });
+    const live = isActive(ch);
+    await query(
+      `update enrollments set custom_domain_verified_at = $1 where id=$2`,
+      [live ? new Date() : null, enr.id]
+    );
+    return res.json({
+      verified: live,
+      status: statusOf(ch),
+      dns_records: live ? null : dnsRecordsFor(enr.custom_domain, ch),
+      note: live ? "Your domain is live." : `Waiting on DNS / certificate (${ch.status} · SSL ${ch.ssl?.status || "pending"}).`,
+    });
+  }
+
+  // legacy self-verify fallback
   const { ok, note } = await verifyCustomDomain(enr);
-  if (!ok) return res.status(400).json({ error: "Not verified yet", note });
-  await query(`update enrollments set custom_domain_verified_at = now() where id=$1`, [enr.id]);
-  res.json({ ok: true, note });
+  await query(`update enrollments set custom_domain_verified_at = $1 where id=$2`, [ok ? new Date() : null, enr.id]);
+  res.json({ verified: ok, note });
 }));
 
 // GET/PUT /portal/hosted-sites/:id/settings  -> the branding pack
@@ -694,11 +731,17 @@ async function verifyCustomDomain(enr) {
 // POST /portal/admin/hosted-sites/:id/verify-custom-domain
 adminRouter.post("/hosted-sites/:id/verify-custom-domain", asyncH(async (req, res) => {
   const enr = (await query(
-    `select id, custom_domain, domain_verify_token from enrollments where id=$1 and type='hosted'`,
+    `select id, custom_domain, custom_hostname_id, domain_verify_token from enrollments where id=$1 and type='hosted'`,
     [req.params.id]
   )).rows[0];
   if (!enr) return res.status(404).json({ error: "Site not found" });
 
+  if (cfConfigured() && enr.custom_hostname_id) {
+    const ch = await getCustomHostname(enr.custom_hostname_id).catch(() => null);
+    if (!isActive(ch)) return res.status(400).json({ error: "Not live yet", note: ch ? `${ch.status} · SSL ${ch.ssl?.status}` : "no record" });
+    await query(`update enrollments set custom_domain_verified_at = now() where id=$1`, [enr.id]);
+    return res.json({ ok: true, note: "Live." });
+  }
   const { ok, note } = await verifyCustomDomain(enr);
   if (!ok) return res.status(400).json({ error: "Verification failed", note });
   await query(`update enrollments set custom_domain_verified_at = now() where id=$1`, [enr.id]);

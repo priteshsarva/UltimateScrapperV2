@@ -24,21 +24,28 @@ function normalizeHost(h) {
 
 const isLocalHost = (h) => h === "localhost" || h === "127.0.0.1" || /^\d+\.\d+\.\d+\.\d+$/.test(h);
 const isPlatformHost = (h) => !!PLATFORM_HOST && (h === PLATFORM_HOST || h.endsWith("." + PLATFORM_HOST));
+// Shared preview hosts where the tenant rides in the path slug, not the domain.
+const isPreviewHost = (h) => /\.(workers\.dev|netlify\.app|vercel\.app|pages\.dev)$/.test(h || "");
 
 export async function resolveStore(req, res, next) {
   const slug = String(req.params.slug || "").toLowerCase();
 
-  // The host the request really arrived on. Behind Cloudflare/a proxy that's
-  // x-forwarded-host; X-Store-Host is the storefront SPA's dev convenience and
-  // is only trusted when the real host is local (can't spoof tenancy in prod).
+  // In production the API lives on a DIFFERENT host than the storefront (the SPA
+  // calls the API's own domain), so the storefront's real host arrives in
+  // X-Store-Host, not Host. Trust it: it only ever selects a VERIFIED custom
+  // domain (or a public platform subdomain), and storefronts are public — there's
+  // no tenant to "spoof into". Fall back to the real host for direct/plugin calls.
   const realHost = normalizeHost(req.headers["x-forwarded-host"] || req.headers.host);
-  const devHost = normalizeHost(req.headers["x-store-host"]);
-  const host = (isLocalHost(realHost) && devHost) ? devHost : realHost;
+  const storeHost = normalizeHost(req.headers["x-store-host"]);
+  const host = storeHost || realHost;
 
   let enr = null;
 
-  // 1) verified custom domain
-  if (host && !isLocalHost(host) && !isPlatformHost(host)) {
+  // 1) A real custom domain (not the platform, local, or a shared preview host)
+  //    resolves ONLY to a verified custom_domain — never to the path slug, which
+  //    would let any domain pointed at us serve an unrelated store.
+  const isCustom = host && !isLocalHost(host) && !isPlatformHost(host) && !isPreviewHost(host);
+  if (isCustom) {
     const { rows } = await query(
       `select id, user_id, slug, status, expiry_date
          from enrollments
@@ -47,12 +54,10 @@ export async function resolveStore(req, res, next) {
       [host]
     );
     enr = rows[0] || null;
-    // a non-platform host that is NOT a verified custom domain gets nothing —
-    // do NOT fall through to the path slug (that's the hijack vector).
     if (!enr) return res.status(404).json({ error: "Store not found" });
   }
 
-  // 2) platform subdomain or local dev → resolve by the path slug
+  // 2) platform subdomain / preview host / local dev → resolve by the path slug
   if (!enr) {
     const { rows } = await query(
       `select id, user_id, slug, status, expiry_date
