@@ -18,7 +18,7 @@ import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOrigi
 import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
 import { sendMail } from "./mailer.js";
 import { sendCustomerOrderEmail } from "./orderEmails.js";
-import { cfConfigured, createCustomHostname, getCustomHostname, deleteCustomHostname, dnsRecordsFor, isActive, statusOf } from "./cloudflareSaas.js";
+import { cfConfigured, createCustomHostname, getCustomHostname, deleteCustomHostname, dnsRecordsFor, isActive, statusOf, ensureWorkerRoute, deleteWorkerRoute } from "./cloudflareSaas.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -347,12 +347,14 @@ clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
     [req.params.id]
   )).rows[0] || {};
 
-  // Retire the old Cloudflare Custom Hostname when the domain changes or is cleared.
-  if (cur.custom_hostname_id && (!domain || domain !== cur.custom_domain) && cfConfigured()) {
-    await deleteCustomHostname(cur.custom_hostname_id);
+  // Retire the old Cloudflare Custom Hostname + Worker route when the domain
+  // changes or is cleared.
+  if (cfConfigured() && cur.custom_domain && (!domain || domain !== cur.custom_domain)) {
+    if (cur.custom_hostname_id) await deleteCustomHostname(cur.custom_hostname_id);
+    await deleteWorkerRoute(cur.custom_domain);
   }
 
-  let dns_records = null, hostnameId = null, token = null, status = null;
+  let dns_records = null, hostnameId = null, token = null, status = null, warning = null;
   if (domain) {
     if (cfConfigured()) {
       // reuse the existing Custom Hostname if the domain is unchanged, else create one
@@ -362,6 +364,11 @@ clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
       }
       if (!ch) ch = await createCustomHostname(domain);
       hostnameId = ch.id;
+      // Point the storefront Worker at this hostname so it serves (else 522).
+      // Best-effort: a domain add shouldn't hard-fail if the token lacks the
+      // Workers Routes scope — surface a warning instead.
+      try { await ensureWorkerRoute(domain); }
+      catch (e) { warning = `Domain saved, but auto-routing failed: ${e.message}. Add a Worker route ${domain}/* to the store Worker, or give the API token "Workers Routes: Edit".`; }
       dns_records = dnsRecordsFor(domain, ch);
       status = statusOf(ch);
     } else {
@@ -386,7 +393,7 @@ clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
     }
     throw err;
   }
-  res.json({ ok: true, custom_domain: domain, dns_records, status });
+  res.json({ ok: true, custom_domain: domain, dns_records, status, warning });
 }));
 
 // POST /portal/hosted-sites/:id/verify-domain — check status (safe to poll).
@@ -401,6 +408,9 @@ clientRouter.post("/hosted-sites/:id/verify-domain", asyncH(async (req, res) => 
   if (!enr?.custom_domain) return res.json({ verified: false, note: "No domain set." });
 
   if (cfConfigured() && enr.custom_hostname_id) {
+    // Self-heal the Worker route (idempotent) so re-checking after the token gets
+    // the Workers Routes scope, or if the route was removed, restores serving.
+    try { await ensureWorkerRoute(enr.custom_domain); } catch { /* surfaced on save */ }
     const ch = await getCustomHostname(enr.custom_hostname_id).catch(() => null);
     if (!ch) return res.json({ verified: false, note: "Domain record not found — re-save the domain." });
     const live = isActive(ch);

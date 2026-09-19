@@ -14,6 +14,10 @@ const TOKEN = process.env.CLOUDFLARE_API_TOKEN || "";
 const ZONE = process.env.CLOUDFLARE_ZONE_ID || "";
 const CNAME_TARGET = (process.env.CUSTOM_DOMAIN_TARGET || process.env.PLATFORM_HOST || "")
   .toLowerCase().replace(/^\.+|\.+$/g, "");
+// The storefront Worker's script name — custom-hostname traffic needs its own
+// Worker route (the *.thekartify.com route doesn't match a non-zone hostname), or
+// Cloudflare 522s to the dummy fallback origin.
+const STORE_WORKER = process.env.STORE_WORKER_NAME || "storefrontend";
 
 export const cfConfigured = () => !!(TOKEN && ZONE);
 
@@ -66,6 +70,30 @@ export function dnsRecordsFor(hostname, ch) {
   add(ch?.ownership_verification);
   for (const v of (ch?.ssl?.validation_records || [])) add(v);
   return recs;
+}
+
+// Point the storefront Worker at a custom hostname. Idempotent: reuses/repoints
+// an existing route for the same pattern. Without this the domain 522s.
+export async function ensureWorkerRoute(hostname) {
+  const pattern = `${hostname}/*`;
+  const routes = await cf(`/workers/routes`);
+  const existing = (routes || []).find((r) => r.pattern === pattern);
+  if (existing) {
+    if (existing.script !== STORE_WORKER) {
+      await cf(`/workers/routes/${existing.id}`, { method: "PUT", body: { pattern, script: STORE_WORKER } });
+    }
+    return existing.id;
+  }
+  const created = await cf(`/workers/routes`, { method: "POST", body: { pattern, script: STORE_WORKER } });
+  return created?.id || null;
+}
+
+export async function deleteWorkerRoute(hostname) {
+  if (!hostname) return;
+  const pattern = `${hostname}/*`;
+  const routes = await cf(`/workers/routes`).catch(() => []);
+  const existing = (routes || []).find((r) => r.pattern === pattern);
+  if (existing) { try { await cf(`/workers/routes/${existing.id}`, { method: "DELETE" }); } catch { /* best effort */ } }
 }
 
 // Fully live = hostname active (routing) AND its cert active (HTTPS).
