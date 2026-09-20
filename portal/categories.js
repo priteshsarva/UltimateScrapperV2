@@ -15,7 +15,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { query, pool } from "./db.js";
 import { getSource, listSources } from "./sources.js";
-import { scrapeCategoriesA, scrapeCategoriesB } from "./scrapeCategories.js";
+import { scrapeCategoriesA, scrapeCategoriesB, scrapeCategoriesC } from "./scrapeCategories.js";
 import { reconcileCategories } from "./reconcileCategories.js";
 import { notify } from "./notifications.js";
 
@@ -167,6 +167,7 @@ export async function scrapeSourceCategories(source, opts = {}) {
   let cats = [];
   if (source.method === "METHOD_A") cats = await scrapeCategoriesA(source.base_url);
   else if (source.method === "METHOD_B") cats = await scrapeCategoriesB(source.base_url);
+  else if (source.method === "METHOD_C") cats = await scrapeCategoriesC(source.base_url);
   else throw new Error(`Unknown scrape method "${source.method}" for source ${source.id}`);
 
   // No de-dupe here any more: reconcileCategories de-dupes by handle, which is

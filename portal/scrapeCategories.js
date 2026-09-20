@@ -5,6 +5,7 @@
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { launchWithPage } from "../core/launchBrowser.js";
+import { harvestHook, classifyHarvest, cartpeImg } from "../core/strategies/methodC.js";
 import "dotenv/config";
 
 puppeteer.use(StealthPlugin());
@@ -94,6 +95,28 @@ export async function scrapeCategoriesA(baseUrl) {
         })
         .filter((c) => c.name)
     );
+  });
+}
+
+// METHOD_C — cartpe.in: the /category page loads an ENCRYPTED /api/all-category
+// response; we harvest the decrypted JSON (see core/strategies/methodC.js) and
+// build the shop-filter URL per category so the crawler knows where to go.
+export async function scrapeCategoriesC(baseUrl) {
+  const base = clean(baseUrl);
+  return withPage(async (page) => {
+    await page.evaluateOnNewDocument(harvestHook);
+    await page.goto(`${base}/category`, { waitUntil: "networkidle2", timeout: 60000 });
+    await new Promise((r) => setTimeout(r, 2000));
+    const strings = await page.evaluate(() => (window.__harvest ? window.__harvest.splice(0) : []));
+    const { categories } = classifyHarvest(strings);
+    return categories
+      .filter((c) => c && c.slug)
+      .map((c) => ({
+        name: (c.category_name || "").trim(),
+        slug: `${base}/shop?c=${encodeURIComponent(c.slug)}`, // absolute listing URL
+        img: cartpeImg(c.image, "category_image_sm"),
+      }))
+      .filter((c) => c.name);
   });
 }
 
