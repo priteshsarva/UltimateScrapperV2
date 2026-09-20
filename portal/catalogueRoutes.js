@@ -9,6 +9,7 @@ import { Router } from "express";
 import { requireAuth } from "./auth.js";
 import { searchCatalogue } from "./catalogueSearch.js";
 import { logCatalogue } from "./activityLog.js";
+import { kickLiveRefresh } from "./searchRoutes.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -38,6 +39,10 @@ router.post("/catalogue/click", (req, res) => {
     category: b.category || null, product_id: b.productId ? String(b.productId).slice(0, 80) : null,
     product_name: b.name ? String(b.name).slice(0, 300) : null, source_name: b.source ? String(b.source).slice(0, 120) : null,
   });
+  // Opening a product also kicks a background live re-scrape (same cooldown /
+  // in-flight budget as the public search landing) so the vendor sees fresh
+  // price/stock next load.
+  kickLiveRefresh(b.category, b.productId);
   res.json({ ok: true });
 });
 

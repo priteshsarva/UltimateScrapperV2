@@ -29,7 +29,7 @@ const _refreshing = new Set();
 const _lastRefresh = new Map();
 const REFRESH_COOLDOWN_MS = 60 * 1000;
 const REFRESH_MAX_INFLIGHT = Math.max(1, parseInt(process.env.REFRESH_MAX_INFLIGHT, 10) || 4);
-function kickLiveRefresh(category, productId) {
+export function kickLiveRefresh(category, productId) {
   if (!CATS.has(category) || !productId) return;
   const k = category + ":" + productId;
   if (_refreshing.has(k)) return;
