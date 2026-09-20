@@ -25,6 +25,27 @@ router.get("/enrollments", async (req, res) => {
   res.json({ enrollments: rows });
 });
 
+// GET /portal/admin/mobiles — every mobile number captured across user data,
+// split into registered (a completed account: profile filled + email) vs
+// unregistered (mobile verified via OTP but the account was never completed).
+router.get("/mobiles", async (req, res) => {
+  const { rows } = await query(
+    `select id, mobile, name, email, role, plan, status, mobile_verified, profile_complete, created_at
+       from users
+      where coalesce(mobile,'') <> ''
+      order by created_at desc`
+  );
+  const norm = (m) => String(m || "").replace(/\D/g, "").slice(-10);
+  const registered = [], unregistered = [];
+  for (const u of rows) {
+    const row = { mobile: u.mobile, mobile10: norm(u.mobile), name: u.name, email: u.email,
+      plan: u.plan, status: u.status, mobile_verified: u.mobile_verified, created_at: u.created_at };
+    if (u.profile_complete && u.email) registered.push(row); else unregistered.push(row);
+  }
+  res.json({ registered, unregistered,
+    counts: { registered: registered.length, unregistered: unregistered.length, total: rows.length } });
+});
+
 // POST /portal/admin/enrollments/:id/approve
 router.post("/enrollments/:id/approve", async (req, res) => {
   const enr = (await query(`select id, domain, type, plan_id, status from enrollments where id=$1`, [req.params.id])).rows[0];
