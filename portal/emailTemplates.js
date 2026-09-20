@@ -34,7 +34,7 @@ function footer(brand, contact) {
 
 // Full HTML document wrapping the body content. `contact` populates the footer
 // with the storefront's own details.
-export function wrap({ title, brand = "Server Products", intro = "", bodyHtml = "", accent = ACCENT, contact = null }) {
+export function wrap({ title, brand = "Kartify", intro = "", bodyHtml = "", accent = ACCENT, contact = null }) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title></head>
 <body style="margin:0;padding:0;background:${BG};-webkit-text-size-adjust:none;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BG};padding:24px 0;">

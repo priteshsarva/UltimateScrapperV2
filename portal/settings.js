@@ -173,7 +173,7 @@ export async function getPlatformUpi() {
   const s = await readRow("platform_upi");
   return {
     upi_id:   s.upi_id   || process.env.PLATFORM_UPI_ID       || "",
-    upi_name: s.upi_name || process.env.PLATFORM_UPI_NAME     || "Server Products",
+    upi_name: s.upi_name || process.env.PLATFORM_UPI_NAME     || "Kartify",
     whatsapp: s.whatsapp || process.env.PLATFORM_BILLING_WHATSAPP || "",
   };
 }

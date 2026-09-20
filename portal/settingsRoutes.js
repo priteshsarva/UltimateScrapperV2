@@ -52,7 +52,7 @@ adminRouter.post("/smtp/test", async (req, res) => {
   const to = (req.body && req.body.to) || req.user.email;
   const r = await sendMail({
     to,
-    subject: "Server Products — SMTP test",
+    subject: "Kartify — SMTP test",
     html: "<p>This is a test email. If you can read this, SMTP is configured correctly.</p>",
   });
   if (r.ok) res.json({ ok: true, to });

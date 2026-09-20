@@ -463,6 +463,25 @@ clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   res.json({ settings: rows[0] });
 }));
 
+// DELETE /portal/hosted-sites/:id — vendor deletes their OWN storefront. Blocked
+// while it's live on an active plan (they'd cancel first). Cleans up any
+// Cloudflare custom hostname + Worker route before removing the enrollment.
+clientRouter.delete("/hosted-sites/:id", asyncH(async (req, res) => {
+  const enr = (await query(
+    `select id, status, custom_domain, custom_hostname_id from enrollments where id=$1 and user_id=$2 and type='hosted'`,
+    [req.params.id, req.user.sub]
+  )).rows[0];
+  if (!enr) return res.status(404).json({ error: "Site not found" });
+  if (enr.status === "active")
+    return res.status(400).json({ error: "This store is live on an active plan — it can't be deleted. Contact support to cancel it first." });
+  if (cfConfigured()) {
+    if (enr.custom_hostname_id) await deleteCustomHostname(enr.custom_hostname_id);
+    if (enr.custom_domain) await deleteWorkerRoute(enr.custom_domain);
+  }
+  await query(`delete from enrollments where id=$1`, [enr.id]);
+  res.json({ ok: true });
+}));
+
 // Vendor (on an allow_own_gateway plan) picks their collection method:
 // 'pay0' = platform Pay0 (default), 'upi' = collect to their own UPI (direct payout).
 clientRouter.put("/hosted-sites/:id/store-gateway", asyncH(async (req, res) => {
@@ -487,7 +506,7 @@ clientRouter.put("/hosted-sites/:id/store-gateway", asyncH(async (req, res) => {
 clientRouter.get("/hosted-sites/:id/sources", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const available = (await query(
-    `select id, name, category from sources where status='active' order by category, name`
+    `select id, name, category, base_url from sources where status='active' order by category, name`
   )).rows;
   const attached = (await query(
     `select source_id from enrollment_sources where enrollment_id=$1`, [req.params.id]
