@@ -3,6 +3,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { dbManager } from '../models/dbManager.js';
 import { fetchDataa } from "./strategies/methodA.js";
 import { fetchDataaB } from "./strategies/methodB.js";
+import { fetchDataC } from "./strategies/methodC.js";
 import { getSource } from "../portal/sources.js"; // source config now comes from Supabase
 
 puppeteer.use(StealthPlugin());
@@ -32,6 +33,9 @@ export async function executeScraper(source) {
         } else if (config.method === "METHOD_B") {
             console.log(`🚀 METHOD_B → ${config.name || config.id}`);
             await fetchDataaB(config.base_url, DB);
+        } else if (config.method === "METHOD_C") {
+            console.log(`🚀 METHOD_C → ${config.name || config.id}`);
+            await fetchDataC(config.base_url, DB);
         } else {
             console.warn(`⚠️ Unknown method '${config.method}' for ${config.id} — skipped.`);
         }

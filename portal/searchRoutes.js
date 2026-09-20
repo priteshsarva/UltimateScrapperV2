@@ -246,26 +246,27 @@ authR.post("/otp/verify", asyncH(async (req, res) => {
   res.json({ token: signToken(user), user, profile_complete: user.profile_complete });
 }));
 
-// After OTP the user can flesh out their account (name / email / password so
-// they can also log in the normal way). Optional — skipping leaves the account
-// verified-but-incomplete.
+// After OTP the user must flesh out their account: name + email are REQUIRED to
+// count as complete (password stays optional — they can still sign in with OTP).
+// An OTP account stays profile_complete=false (and gated in the app) until then.
 authR.post("/complete-profile", requireAuth, asyncH(async (req, res) => {
-  const { name, email, password } = req.body || {};
-  const sets = ["profile_complete=true"], params = [];
-  if (name != null) { params.push(String(name).trim() || null); sets.push(`name=$${params.length}`); }
-  if (email) {
-    const em = String(email).trim().toLowerCase();
-    if ((await query(`select 1 from users where lower(email)=$1 and id<>$2`, [em, req.user.sub])).rowCount)
-      return res.status(409).json({ error: "That email is already registered" });
-    params.push(em); sets.push(`email=$${params.length}`);
-  }
+  const name = String(req.body?.name || "").trim();
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const password = req.body?.password;
+  if (!name) return res.status(400).json({ error: "Please enter your name" });
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "Please enter a valid email" });
+  if ((await query(`select 1 from users where lower(email)=$1 and id<>$2`, [email, req.user.sub])).rowCount)
+    return res.status(409).json({ error: "That email is already registered" });
+
+  const sets = ["profile_complete=true", "name=$1", "email=$2"];
+  const params = [name, email];
   if (password) {
     if (String(password).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
     params.push(await hashPassword(password)); sets.push(`password_hash=$${params.length}`);
   }
   params.push(req.user.sub);
   const u = (await query(`update users set ${sets.join(", ")} where id=$${params.length}
-     returning id, email, name, role, plan, status`, params)).rows[0];
+     returning id, email, name, role, plan, status, profile_complete`, params)).rows[0];
   res.json({ user: u });
 }));
 

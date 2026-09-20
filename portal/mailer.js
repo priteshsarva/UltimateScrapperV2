@@ -46,7 +46,7 @@ function layout(title, bodyHtml) {
     <h2 style="color:#0E1726;margin:0 0 12px">${title}</h2>
     ${bodyHtml}
     <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
-    <p style="color:#8a94a6;font-size:12px;margin:0">Server Products</p>
+    <p style="color:#8a94a6;font-size:12px;margin:0">Kartify</p>
   </div>`;
 }
 function payButton() {
@@ -61,7 +61,7 @@ export function sendWelcomeEmail(user, shop) {
   return sendMail({
     to: user.email,
     subject: "Welcome — your shop has been submitted",
-    html: layout("Welcome to Server Products", `
+    html: layout("Welcome to Kartify", `
       <p>Hi ${user.name || "there"},</p>
       <p>Your account is set up and your shop <b>${shop.domain}</b> has been submitted for approval.</p>
       <p>Once it's approved, we'll email you an invoice to activate your subscription.</p>`),

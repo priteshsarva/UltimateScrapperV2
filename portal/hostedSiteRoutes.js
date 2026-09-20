@@ -18,7 +18,7 @@ import { listSiteBrands, listSiteSubcategories, listSiteSubBrands, categoryOrigi
 import { listSiteRawCategories, saveSiteCategoryMapping } from "./categoryMap.js";
 import { sendMail } from "./mailer.js";
 import { sendCustomerOrderEmail } from "./orderEmails.js";
-import { cfConfigured, createCustomHostname, getCustomHostname, deleteCustomHostname, dnsRecordsFor, isActive, statusOf } from "./cloudflareSaas.js";
+import { cfConfigured, createCustomHostname, getCustomHostname, deleteCustomHostname, dnsRecordsFor, isActive, statusOf, ensureWorkerRoute, deleteWorkerRoute } from "./cloudflareSaas.js";
 
 // The platform's own wildcard base (e.g. "yourplatform.com"). Vendors reach
 // their stores at <slug>.PLATFORM_HOST; a custom domain is anything else. Used
@@ -347,12 +347,14 @@ clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
     [req.params.id]
   )).rows[0] || {};
 
-  // Retire the old Cloudflare Custom Hostname when the domain changes or is cleared.
-  if (cur.custom_hostname_id && (!domain || domain !== cur.custom_domain) && cfConfigured()) {
-    await deleteCustomHostname(cur.custom_hostname_id);
+  // Retire the old Cloudflare Custom Hostname + Worker route when the domain
+  // changes or is cleared.
+  if (cfConfigured() && cur.custom_domain && (!domain || domain !== cur.custom_domain)) {
+    if (cur.custom_hostname_id) await deleteCustomHostname(cur.custom_hostname_id);
+    await deleteWorkerRoute(cur.custom_domain);
   }
 
-  let dns_records = null, hostnameId = null, token = null, status = null;
+  let dns_records = null, hostnameId = null, token = null, status = null, warning = null;
   if (domain) {
     if (cfConfigured()) {
       // reuse the existing Custom Hostname if the domain is unchanged, else create one
@@ -362,6 +364,11 @@ clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
       }
       if (!ch) ch = await createCustomHostname(domain);
       hostnameId = ch.id;
+      // Point the storefront Worker at this hostname so it serves (else 522).
+      // Best-effort: a domain add shouldn't hard-fail if the token lacks the
+      // Workers Routes scope — surface a warning instead.
+      try { await ensureWorkerRoute(domain); }
+      catch (e) { warning = `Domain saved, but auto-routing failed: ${e.message}. Add a Worker route ${domain}/* to the store Worker, or give the API token "Workers Routes: Edit".`; }
       dns_records = dnsRecordsFor(domain, ch);
       status = statusOf(ch);
     } else {
@@ -386,7 +393,7 @@ clientRouter.put("/hosted-sites/:id/custom-domain", asyncH(async (req, res) => {
     }
     throw err;
   }
-  res.json({ ok: true, custom_domain: domain, dns_records, status });
+  res.json({ ok: true, custom_domain: domain, dns_records, status, warning });
 }));
 
 // POST /portal/hosted-sites/:id/verify-domain — check status (safe to poll).
@@ -401,6 +408,9 @@ clientRouter.post("/hosted-sites/:id/verify-domain", asyncH(async (req, res) => 
   if (!enr?.custom_domain) return res.json({ verified: false, note: "No domain set." });
 
   if (cfConfigured() && enr.custom_hostname_id) {
+    // Self-heal the Worker route (idempotent) so re-checking after the token gets
+    // the Workers Routes scope, or if the route was removed, restores serving.
+    try { await ensureWorkerRoute(enr.custom_domain); } catch { /* surfaced on save */ }
     const ch = await getCustomHostname(enr.custom_hostname_id).catch(() => null);
     if (!ch) return res.json({ verified: false, note: "Domain record not found — re-save the domain." });
     const live = isActive(ch);
@@ -453,6 +463,25 @@ clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   res.json({ settings: rows[0] });
 }));
 
+// DELETE /portal/hosted-sites/:id — vendor deletes their OWN storefront. Blocked
+// while it's live on an active plan (they'd cancel first). Cleans up any
+// Cloudflare custom hostname + Worker route before removing the enrollment.
+clientRouter.delete("/hosted-sites/:id", asyncH(async (req, res) => {
+  const enr = (await query(
+    `select id, status, custom_domain, custom_hostname_id from enrollments where id=$1 and user_id=$2 and type='hosted'`,
+    [req.params.id, req.user.sub]
+  )).rows[0];
+  if (!enr) return res.status(404).json({ error: "Site not found" });
+  if (enr.status === "active")
+    return res.status(400).json({ error: "This store is live on an active plan — it can't be deleted. Contact support to cancel it first." });
+  if (cfConfigured()) {
+    if (enr.custom_hostname_id) await deleteCustomHostname(enr.custom_hostname_id);
+    if (enr.custom_domain) await deleteWorkerRoute(enr.custom_domain);
+  }
+  await query(`delete from enrollments where id=$1`, [enr.id]);
+  res.json({ ok: true });
+}));
+
 // Vendor (on an allow_own_gateway plan) picks their collection method:
 // 'pay0' = platform Pay0 (default), 'upi' = collect to their own UPI (direct payout).
 clientRouter.put("/hosted-sites/:id/store-gateway", asyncH(async (req, res) => {
@@ -477,7 +506,7 @@ clientRouter.put("/hosted-sites/:id/store-gateway", asyncH(async (req, res) => {
 clientRouter.get("/hosted-sites/:id/sources", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const available = (await query(
-    `select id, name, category from sources where status='active' order by category, name`
+    `select id, name, category, base_url from sources where status='active' order by category, name`
   )).rows;
   const attached = (await query(
     `select source_id from enrollment_sources where enrollment_id=$1`, [req.params.id]

@@ -8,7 +8,7 @@ import {
   listSourceCategories, setCategoryEnabled,
   refreshSourceCategoriesFromDB, refreshAllSourceCategoriesFromDB, scrapeSourceCategories,
 } from "./categories.js";
-import { scrapeCategoriesA, scrapeCategoriesB } from "./scrapeCategories.js";
+import { scrapeCategoriesA, scrapeCategoriesB, scrapeCategoriesC } from "./scrapeCategories.js";
 
 // ---------- client ----------
 const clientRouter = Router();
@@ -53,13 +53,14 @@ adminRouter.post("/preview", async (req, res) => {
   if (!url) return res.status(400).json({ error: "url required" });
 
   let method = (req.body && req.body.method || "").toUpperCase();
-  if (method !== "METHOD_A" && method !== "METHOD_B") {
-    method = /jdweb(nship|connect)/i.test(url) ? "METHOD_B" : "METHOD_A";
+  if (!["METHOD_A", "METHOD_B", "METHOD_C"].includes(method)) {
+    method = /\.cartpe\.in/i.test(url) ? "METHOD_C"
+      : /jdweb(nship|connect)/i.test(url) ? "METHOD_B" : "METHOD_A";
   }
 
   try {
-    const categories = method === "METHOD_B"
-      ? await scrapeCategoriesB(url)
+    const categories = method === "METHOD_C" ? await scrapeCategoriesC(url)
+      : method === "METHOD_B" ? await scrapeCategoriesB(url)
       : await scrapeCategoriesA(url);
     res.json({ ok: true, url, method, count: categories.length, categories });
   } catch (e) {

@@ -3,7 +3,7 @@
 // is exactly what customers/vendors receive.
 import { buildCustomerOrderEmail, buildVendorOrderEmail, buildPayoutEmail } from "./orderEmails.js";
 
-const BRAND = "Server Products";
+const BRAND = "Kartify";
 const SAMPLE_ORDER = {
   order_no: "ORD-000123", total: 3298, subtotal: 3298, payment_status: "verified",
   buyer_name: "Deepak Nandu", buyer_phone: "+91 98205 24003", buyer_email: "buyer@example.com",

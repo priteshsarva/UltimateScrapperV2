@@ -10,6 +10,7 @@ import { SITES_REGISTRY } from "../config/sites.js";
 import { listSources } from "../portal/sources.js";
 import { scrapeSingleProductMethodA } from "./strategies/liveMethodA.js";
 import { scrapeSingleProductMethodB } from "./strategies/LiveMethodB.js";
+import { scrapeSingleProductMethodC } from "./strategies/liveMethodC.js";
 
 // Which scrape method a product's source uses. Resolved from the LIVE Postgres
 // source registry FIRST (an admin can add a source without a code deploy — those
@@ -79,6 +80,7 @@ export async function rescrape(product, dbName) {
   const method = await resolveMethod(fetchedFrom);
   if (method === "METHOD_A") return await scrapeSingleProductMethodA(product.productUrl, dbName);
   if (method === "METHOD_B") return await scrapeSingleProductMethodB(product.productUrl, dbName);
+  if (method === "METHOD_C") return await scrapeSingleProductMethodC(product.productUrl, dbName);
   return null;
 }
 
