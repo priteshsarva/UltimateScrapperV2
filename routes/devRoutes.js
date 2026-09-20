@@ -3,6 +3,7 @@ import { dbManager } from '../models/dbManager.js';
 import { bulkSafeSyncProducts, BulkProductOutOfStock, getProductBydetails, WP_SITES, deleteProduct, fetchAllMatchingProducts, upsertProductSafe, syncProductToAllSites, markProductOutOfStock, getAuthHeader } from "../core/wpBulkSafeSync.js";
 import { scrapeSingleProductMethodA } from '../core/strategies/liveMethodA.js';
 import { scrapeSingleProductMethodB } from '../core/strategies/LiveMethodB.js';
+import { scrapeSingleProductMethodC } from '../core/strategies/liveMethodC.js';
 import { resolveMethod } from '../core/refreshProduct.js';
 import sqlite3 from 'sqlite3';
 import fs from 'fs';
@@ -354,6 +355,9 @@ router.get('/update-single-product', async (req, res) => {
             } else if (method === "METHOD_B") {
                 console.log("🚀 Firing Single Scraper Method B...");
                 freshProductData = await scrapeSingleProductMethodB(targetUrl, targetDbName);
+            } else if (method === "METHOD_C") {
+                console.log("🚀 Firing Single Scraper Method C...");
+                freshProductData = await scrapeSingleProductMethodC(targetUrl, targetDbName);
             } else {
                 throw new Error("Unknown scraping method");
             }
