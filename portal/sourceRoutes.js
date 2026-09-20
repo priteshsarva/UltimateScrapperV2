@@ -25,11 +25,17 @@ router.post("/", async (req, res) => {
 
 // PATCH /portal/admin/sources/:id   (edit any field, or { status:'paused'|'active' })
 router.patch("/:id", async (req, res) => {
-  const cur = await getSource(req.params.id);
-  if (!cur) return res.status(404).json({ error: "Not found" });
-  if (req.body.status) await setSourceStatus(req.params.id, req.body.status);
-  const merged = { ...cur, ...req.body, id: req.params.id };
-  res.json({ source: await upsertSource(merged) });
+  try {
+    const cur = await getSource(req.params.id);
+    if (!cur) return res.status(404).json({ error: "Not found" });
+    if (req.body.status) await setSourceStatus(req.params.id, req.body.status);
+    const merged = { ...cur, ...req.body, id: req.params.id };
+    res.json({ source: await upsertSource(merged) });
+  } catch (e) {
+    // e.g. an invalid method hits the sources_method_check constraint — return a
+    // clear error instead of an unhandled rejection that crash-loops the server.
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // DELETE /portal/admin/sources/:id  — remove from the registry (blocked if in use)

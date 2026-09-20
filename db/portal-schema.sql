@@ -36,7 +36,7 @@ create table if not exists sources (
   id              text primary key,                 -- keep your string ids, e.g. 'shoemartt'
   name            text not null,
   category        text not null check (category in ('shoes','watches')),
-  method          text not null check (method in ('METHOD_A','METHOD_B')),
+  method          text not null check (method in ('METHOD_A','METHOD_B','METHOD_C','MANUAL')),
   base_url        text,
   search_key      text,                             -- maps to productFetchedFrom LIKE
   status          text not null default 'active' check (status in ('active','paused')),
