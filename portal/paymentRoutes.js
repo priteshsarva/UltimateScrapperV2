@@ -28,6 +28,29 @@ router.get("/invoices", requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Create (or re-create) the Pay0 order for an unpaid invoice -> { payment_url } | { error }.
+// Shared with the WhatsApp bot (portal/waRoutes.js).
+export async function startInvoicePayment(inv) {
+  const user = (await query(`select mobile from users where id=$1`, [inv.user_id])).rows[0] || {};
+  const orderId = `INV-${inv.id}`; // stable per invoice, so re-tries reuse the same order
+  const redirectUrl = SERVER_URL ? `${SERVER_URL}/portal/pay/callback?invoice=${inv.id}` : `${APP_URL}/billing`;
+
+  const order = await createOrder({
+    amount: inv.amount,
+    orderId,
+    customerMobile: user.mobile,
+    redirectUrl,
+    remark: inv.invoice_no,
+  });
+  if (!order.ok || !order.payment_url) return { error: order.message || "Payment gateway error" };
+
+  await query(
+    `update invoices set gateway_order_id=$1, gateway_payment_url=$2, status='pending' where id=$3`,
+    [order.order_id, order.payment_url, inv.id]
+  );
+  return { payment_url: order.payment_url };
+}
+
 // start payment for an invoice -> returns Pay0 payment_url to redirect to
 router.post("/invoices/:id/pay", requireAuth, async (req, res) => {
   try {
@@ -35,26 +58,9 @@ router.post("/invoices/:id/pay", requireAuth, async (req, res) => {
     if (!inv) return res.status(404).json({ error: "Invoice not found" });
     if (inv.status === "paid") return res.status(400).json({ error: "Already paid" });
 
-    const user = (await query(`select mobile from users where id=$1`, [req.user.sub])).rows[0] || {};
-    const orderId = `INV-${inv.id}`; // stable per invoice, so re-tries reuse the same order
-    const redirectUrl = SERVER_URL ? `${SERVER_URL}/portal/pay/callback?invoice=${inv.id}` : `${APP_URL}/billing`;
-
-    const order = await createOrder({
-      amount: inv.amount,
-      orderId,
-      customerMobile: user.mobile,
-      redirectUrl,
-      remark: inv.invoice_no,
-    });
-    if (!order.ok || !order.payment_url) {
-      return res.status(502).json({ error: "Payment gateway error", detail: order.message });
-    }
-
-    await query(
-      `update invoices set gateway_order_id=$1, gateway_payment_url=$2, status='pending' where id=$3`,
-      [order.order_id, order.payment_url, inv.id]
-    );
-    res.json({ payment_url: order.payment_url });
+    const r = await startInvoicePayment(inv);
+    if (r.error) return res.status(502).json({ error: "Payment gateway error", detail: r.error });
+    res.json({ payment_url: r.payment_url });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

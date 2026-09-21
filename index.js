@@ -69,6 +69,7 @@ import { wholesaleProductClientRoutes, wholesaleProductAdminRoutes } from "./por
 import uploadRoutes from "./portal/uploadRoutes.js";
 import { walletClientRoutes, walletAdminRoutes } from "./portal/walletRoutes.js";
 import { fulfilmentClientRoutes, fulfilmentAdminRoutes } from "./portal/fulfilmentRoutes.js";
+import { waInternalRoutes, waAdminRoutes } from "./portal/waRoutes.js";
 
 
 // const PORT = process.env.PORT || 5000;
@@ -196,6 +197,8 @@ app.use(cors({
     allowedHeaders: ["Content-Type", "Authorization", "X-Store-Host", "x-enrollment-key", "x-site-domain", "X-Preview-Token", "x-device-id"]
 }));
 
+app.use("/internal/wa", waInternalRoutes);                // WhatsApp bot -> backend (x-internal-key)
+app.use("/portal/admin/wa", waAdminRoutes);               // admin: bot FAQs, questions, status
 app.use("/portal/scrape-requests", scrapeRequestRoutes);
 app.use("/portal/admin/scrape-requests", adminScrapeRequestRoutes);
 app.use("/portal/admin/sources", sourceRoutes);
