@@ -9,6 +9,8 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { bestMatch } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
+import { answerWithAi, polish, businessProfile, DEFAULT_PROFILE, aiUsage } from "./waGemini.js";
+import { saveSettings } from "./settings.js";
 
 const APP_URL = process.env.APP_URL || "http://localhost:5174";
 const LANGS = ["en", "hinglish", "hi"];
@@ -38,6 +40,15 @@ async function userByPhone(phone) {
   )).rows[0] || null;
 }
 
+// Fallback when Gemini is off/failed: keep the owner's text as typed, in the one
+// language it was written in (Devanagari -> Hindi, else the asker's Latin-script language).
+function langColumns(text, lang) {
+  const col = /[ऀ-ॿ]/.test(text) ? "hi" : (lang === "hi" ? "hinglish" : lang);
+  const out = { answer_en: "", answer_hinglish: "", answer_hi: "" };
+  out[`answer_${LANGS.includes(col) ? col : "hinglish"}`] = String(text).trim();
+  return out;
+}
+
 // answer text in the asker's language, falling back to whichever version exists
 export function pickAnswer(faq, lang) {
   const order = [lang, ...LANGS.filter((l) => l !== lang)];
@@ -57,13 +68,13 @@ waInternalRoutes.use((req, res, next) => {
   next();
 });
 
-// Everything the menus need about one number, in one call.
-waInternalRoutes.get("/contact/:phone", async (req, res) => {
-  try {
-    const phone = digits(req.params.phone);
+// Everything the menus need about one number, in one call. Also feeds the AI layer.
+export async function contactFor(rawPhone) {
+  {
+    const phone = digits(rawPhone);
     const lang = (await query(`select lang from wa_contacts where phone=$1`, [phone])).rows[0]?.lang || null;
     const user = await userByPhone(phone);
-    if (!user) return res.json({ phone, lang, user: null, sites: [], invoices: [], orders: [], app_url: APP_URL });
+    if (!user) return { phone, lang, user: null, sites: [], invoices: [], orders: [], app_url: APP_URL };
 
     const [sites, invoices, orders] = await Promise.all([
       query(
@@ -81,8 +92,13 @@ waInternalRoutes.get("/contact/:phone", async (req, res) => {
           where e.user_id=$1
           order by o.created_at desc limit 5`, [user.id]),
     ]);
-    res.json({ phone, lang, user, sites: sites.rows, invoices: invoices.rows, orders: orders.rows, app_url: APP_URL });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    return { phone, lang, user, sites: sites.rows, invoices: invoices.rows, orders: orders.rows, app_url: APP_URL };
+  }
+}
+
+waInternalRoutes.get("/contact/:phone", async (req, res) => {
+  try { res.json(await contactFor(req.params.phone)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 waInternalRoutes.put("/contact/:phone/lang", async (req, res) => {
@@ -107,12 +123,35 @@ waInternalRoutes.post("/invoices/:id/pay-link", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+const faqAnswer = async (id, lang) => {
+  const faq = (await query(`update wa_faqs set hits = hits + 1 where id=$1 returning *`, [id])).rows[0];
+  return faq ? pickAnswer(faq, lang) : null;
+};
+
+// Keyword match first (free, instant). Only what it misses goes to Gemini, which
+// either points at a saved answer or answers from the profile + this client's data.
 waInternalRoutes.post("/match", async (req, res) => {
   try {
-    const m = bestMatch(req.body?.text, await phrases());
-    if (!m) return res.json({ answer: null });
-    const faq = (await query(`update wa_faqs set hits = hits + 1 where id=$1 returning *`, [m.faq_id])).rows[0];
-    res.json({ faq_id: m.faq_id, score: m.score, answer: faq ? pickAnswer(faq, req.body?.lang) : null });
+    const { text, lang, phone } = req.body || {};
+    const m = bestMatch(text, await phrases());
+    if (m) return res.json({ faq_id: m.faq_id, score: m.score, answer: await faqAnswer(m.faq_id, lang) });
+
+    const faqs = (await query(
+      `select f.id, f.answer_en, f.answer_hinglish, f.answer_hi,
+              coalesce(array_agg(p.phrase) filter (where p.id is not null), '{}') as phrases
+         from wa_faqs f left join wa_faq_phrases p on p.faq_id = f.id
+        group by f.id order by f.hits desc limit 80`)).rows;
+    const ai = await answerWithAi({ question: text, lang, faqs, contact: await contactFor(phone) });
+    if (!ai) return res.json({ answer: null });
+    if (ai.faq_id) return res.json({ faq_id: ai.faq_id, source: "ai", answer: await faqAnswer(ai.faq_id, lang) });
+
+    // Log what the AI said on its own, so the owner can see it in the portal and correct it.
+    await query(
+      `insert into wa_questions (phone, jid, user_id, name, text, lang, status, answer, source, answered_at)
+       values ($1,$2,$3,$4,$5,$6,'answered',$7,'ai', now())`,
+      [digits(phone), req.body?.jid || "", (await userByPhone(phone))?.id || null, req.body?.name || null,
+       text, LANGS.includes(lang) ? lang : "hinglish", ai.answer]);
+    res.json({ source: "ai", answer: ai.answer });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -135,41 +174,58 @@ waInternalRoutes.patch("/questions/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
-// Owner answered. Body: { id | owner_msg_id } + one of { text } | { faq_id } | { skip: true }.
-// text -> new FAQ (its phrase = the asker's words); faq_id -> the asker's words
-// become a new phrase of that FAQ. Returns what to send the asker.
+// Owner answered. Body: { id | owner_msg_id } + one of { text } | { faq_id } | { skip } | { text, fix }.
+// text -> Gemini tidies it and writes all three languages -> new FAQ (its phrase =
+// the asker's words). faq_id -> the asker's words become a new phrase of that FAQ.
+// fix -> rewrite the answer of an already-answered question (no message to the client).
 waInternalRoutes.post("/answer", async (req, res) => {
   try {
-    const { id, owner_msg_id, text, faq_id, skip } = req.body || {};
+    const { id, owner_msg_id, text, faq_id, skip, fix } = req.body || {};
     const q = (await query(
       id ? `select * from wa_questions where id=$1` : `select * from wa_questions where owner_msg_id=$1`,
       [id || owner_msg_id || ""]
     )).rows[0];
     if (!q) return res.status(404).json({ error: "question not found" });
-    if (q.status !== "pending") return res.status(409).json({ error: `#${q.id} already ${q.status}` });
+
+    if (fix) {
+      if (!String(text || "").trim()) return res.status(400).json({ error: "empty correction" });
+      const versions = (await polish({ text, lang: q.lang })) || langColumns(text, q.lang);
+      const faq = q.faq_id
+        ? (await query(`update wa_faqs set answer_en=$1, answer_hinglish=$2, answer_hi=$3, updated_at=now() where id=$4 returning *`,
+            [versions.answer_en, versions.answer_hinglish, versions.answer_hi, q.faq_id])).rows[0]
+        : (await query(`insert into wa_faqs (answer_en, answer_hinglish, answer_hi) values ($1,$2,$3) returning *`,
+            [versions.answer_en, versions.answer_hinglish, versions.answer_hi])).rows[0];
+      if (!q.faq_id) await query(`insert into wa_faq_phrases (faq_id, phrase) values ($1,$2)`, [faq.id, q.text]);
+      const answer = pickAnswer(faq, q.lang);
+      await query(`update wa_questions set faq_id=$1, answer=$2, source='owner' where id=$3`, [faq.id, answer, q.id]);
+      dropCache();
+      return res.json({ question: q, answer, faq_id: faq.id, versions, fixed: true });
+    }
+
+    if (q.status !== "pending") return res.status(409).json({ error: `#${q.id} already ${q.status} — use "#${q.id} fix <text>" to correct it` });
 
     if (skip) {
       await query(`update wa_questions set status='skipped', answered_at=now() where id=$1`, [q.id]);
       return res.json({ question: q, answer: null });
     }
 
-    let faq;
+    let faq, versions = null;
     if (faq_id) {
       faq = (await query(`select * from wa_faqs where id=$1`, [faq_id])).rows[0];
       if (!faq) return res.status(404).json({ error: `FAQ ${faq_id} not found` });
     } else {
       if (!String(text || "").trim()) return res.status(400).json({ error: "empty answer" });
-      // Devanagari -> Hindi; otherwise assume the owner wrote in the asker's (Latin-script) language.
-      const col = /[ऀ-ॿ]/.test(text) ? "hi" : (q.lang === "hi" ? "hinglish" : q.lang);
-      faq = (await query(`insert into wa_faqs (answer_${col}) values ($1) returning *`, [text.trim()])).rows[0];
+      versions = (await polish({ text, lang: q.lang })) || langColumns(text, q.lang);
+      faq = (await query(`insert into wa_faqs (answer_en, answer_hinglish, answer_hi) values ($1,$2,$3) returning *`,
+        [versions.answer_en, versions.answer_hinglish, versions.answer_hi])).rows[0];
     }
     await query(`insert into wa_faq_phrases (faq_id, phrase) values ($1,$2)`, [faq.id, q.text]);
     const answer = pickAnswer(faq, q.lang);
     await query(
-      `update wa_questions set status='answered', faq_id=$1, answer=$2, answered_at=now() where id=$3`,
+      `update wa_questions set status='answered', faq_id=$1, answer=$2, source='owner', answered_at=now() where id=$3`,
       [faq.id, answer, q.id]);
     dropCache();
-    res.json({ question: q, answer, faq_id: faq.id });
+    res.json({ question: q, answer, faq_id: faq.id, versions });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -284,7 +340,19 @@ waInternalRoutes.post("/bot-status", (req, res) => {
 export const waAdminRoutes = Router();
 waAdminRoutes.use(requireAuth, requireAdmin);
 
-waAdminRoutes.get("/status", (req, res) => res.json(botStatus));
+waAdminRoutes.get("/status", (req, res) => res.json({ ...botStatus, ai: aiUsage() }));
+
+// The business description the AI answers from. Empty = the built-in default.
+waAdminRoutes.get("/business", async (req, res) => {
+  res.json({ profile: await businessProfile(), default_profile: DEFAULT_PROFILE });
+});
+
+waAdminRoutes.put("/business", async (req, res) => {
+  try {
+    await saveSettings("wa_business", { profile: String(req.body?.profile || "").trim() });
+    res.json({ profile: await businessProfile() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 waAdminRoutes.get("/faqs", async (req, res) => {
   try {

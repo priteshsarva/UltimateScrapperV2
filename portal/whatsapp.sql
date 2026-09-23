@@ -62,3 +62,6 @@ create table if not exists wa_chats (
   opted_out   boolean not null default false
 );
 create index if not exists idx_wa_chats_phone on wa_chats(phone);
+
+-- Who produced the answer: 'owner' (you typed it) or 'ai' (Gemini answered on its own).
+alter table wa_questions add column if not exists source text not null default 'owner';
