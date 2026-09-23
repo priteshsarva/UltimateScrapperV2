@@ -10,10 +10,17 @@ import { requireAuth, requireAdmin } from "./auth.js";
 import { bestMatch } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
 import { converse, extraNotes, aiUsage } from "./waGemini.js";
+import { searchCatalogue } from "./catalogueSearch.js";
 import { saveSettings } from "./settings.js";
 
 const APP_URL = process.env.APP_URL || "http://localhost:5174";
 const LANGS = ["en", "hinglish", "hi"];
+// The funnel line that goes with product photos — prices live on the portal, not in chat.
+const PORTAL_LINE = {
+  en: "Full range and prices here",
+  hinglish: "Poora collection aur prices yahan dekhiye",
+  hi: "पूरा कलेक्शन और प्राइस यहाँ देखिए",
+};
 const digits = (p) => String(p || "").replace(/\D/g, "");
 
 // ---- phrase cache (every FAQ phrase; reloaded after any write) ----
@@ -165,6 +172,18 @@ waInternalRoutes.post("/reply", async (req, res) => {
          on conflict (phone) do update set lang=excluded.lang, updated_at=now()`, [contact.phone, lang]);
 
       let reply = ai.reply.trim();
+      let products = [];
+      // Product photos + a portal link: the funnel. No prices here — prices are on the portal.
+      if (ai.action === "show_products") {
+        const q = String(ai.product_query || text).slice(0, 60);
+        const found = await searchCatalogue({ q, stock: "in", limit: 3 }).catch(() => ({ results: [] }));
+        products = (found.results || []).filter((p) => p.image).slice(0, 3).map((p) => ({
+          image: p.image,
+          caption: [p.name, p.brand && `Brand: ${p.brand}`, p.sizes?.length && `Sizes: ${p.sizes.slice(0, 8).join(", ")}`,
+                    p.catName && `Category: ${p.catName}`].filter(Boolean).join("\n"),
+        }));
+        reply += `\n\n${PORTAL_LINE[lang] || PORTAL_LINE.hinglish} 👉 ${APP_URL}/?q=${encodeURIComponent(q)}`;
+      }
       if (ai.action === "pay_link" && contact.invoices?.length) {
         const inv = (await query(`select * from invoices where id=$1`, [contact.invoices[0].id])).rows[0];
         const r = inv ? await startInvoicePayment(inv).catch(() => ({})) : {};
@@ -177,7 +196,7 @@ waInternalRoutes.post("/reply", async (req, res) => {
           `insert into wa_questions (phone, jid, user_id, name, text, lang, status, answer, source, answered_at)
            values ($1,$2,$3,$4,$5,$6,'answered',$7,'ai', now())`,
           [digits(phone), jid, contact.user?.id || null, name || null, text, lang, reply]);
-        return res.json({ reply, lang, source: "ai" });
+        return res.json({ reply, lang, products, source: "ai" });
       }
       return res.json({ reply, lang, escalate: true, source: "ai" });
     }
