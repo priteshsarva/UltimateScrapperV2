@@ -41,12 +41,13 @@ function spend() {
   used.n++;
   return true;
 }
-export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: !!process.env.GEMINI_API_KEY, model: MODEL });
+export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: keys().length > 0, keys: keys().length, model: MODEL });
 
 // Gemini calls run one at a time, spaced out: the free tier limits requests per
 // MINUTE, and three clients typing at once would otherwise burn the quota and get
 // nothing back. A queued call still beats "sorry, please try again".
 let chain = Promise.resolve();
+// With several keys the gap can be small — each call goes to a different key.
 const MIN_GAP_MS = Number(process.env.WA_AI_GAP_MS || 1200);
 function serialize(fn) {
   const run = chain.then(fn, fn);
@@ -58,8 +59,15 @@ function serialize(fn) {
 // 503/429 ("high demand") is common and clears in a second, so it gets one retry.
 const ask = (prompt) => serialize(() => askNow(prompt));
 
+// One or many keys: GEMINI_API_KEYS=key1,key2,key3 (GEMINI_API_KEY still works).
+// Each key has its own free quota, so a rate-limited call retries on the next key.
+const keys = () => (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "")
+  .split(",").map((k) => k.trim()).filter(Boolean);
+let keyTurn = 0;
+
 async function askNow(prompt, retry = true) {
-  const key = process.env.GEMINI_API_KEY;
+  const pool = keys();
+  const key = pool[keyTurn++ % pool.length];
   if (!key || !spend()) return null;
   try {
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
@@ -75,7 +83,9 @@ async function askNow(prompt, retry = true) {
     if (!r.ok) {
       console.error("[wa-ai]", r.status, j?.error?.message || "");
       if (retry && (r.status === 503 || r.status === 429)) {
-        await new Promise((s) => setTimeout(s, 1500));
+        // Rate limited: the next call already uses the next key, so retry fast when
+        // there is more than one; wait a moment when there is only one.
+        await new Promise((s) => setTimeout(s, pool.length > 1 ? 200 : 1500));
         return askNow(prompt, false);
       }
       return null;
@@ -119,6 +129,24 @@ const PLAYBOOK = `HOW YOU TALK
 - Use their name rarely — at most once in a while, not in every message.
 - Earlier messages in this chat may have been written by an older, robotic version of this system or
   by the owner in a hurry. Never copy their style or their menus — always write in your own natural way.
+
+THEIR FIRST MESSAGE IN A CHAT (when CONVERSATION SO FAR is empty)
+Your reply MUST have all three parts, in this order, in about two short lines:
+  1. a warm greeting + how are you ("Kaise ho aap?" / "Aap kaise hain?" / "How are you doing?")
+  2. ONE short hook: a ready online store with products and photos included, nothing to stock
+  3. ONE light question that gets them talking about their shop
+Never send only a greeting — a bare "Hello, kaise ho aap?" is a wasted message, it MUST carry the
+hook and the question too.
+These show the shape; mix and vary the wording yourself, never repeat one word for word:
+ - "Kaise ho aap ji? Hum shop wale bhaiyon ko banaya banaya online store dete hain — na stock, na
+    photo ka jhanjhat. Aapki shop kis cheez ki hai?"
+ - "Aur ji, sab badhiya? Aaj kal log apna saara maal online bhi bech rahe hain, wahi setup hum
+    ready karke dete hain. Aap kya bechte ho?"
+ - "How are you doing? We set shop owners up with a ready online store — products and photos are
+    already in it, nothing to stock. What do you sell?"
+Language for a first message: if they wrote a full sentence in English, reply fully in English.
+If they wrote in Devanagari, reply fully in Devanagari — never mix scripts in one message.
+If it is ONLY a greeting ("hi", "hello", "namaste") with nothing else, reply in Hinglish.
 
 HOW YOU SELL (you are a helpful shop-owner friend, not a salesman)
 - Early on, get to know them like a person: how their day/business is going, what they sell,
