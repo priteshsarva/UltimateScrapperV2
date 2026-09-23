@@ -16,3 +16,4 @@ databases/*.db-shm
 # Firebase service-account key — SECRET, never commit / auto-push
 /authntic-firebase-adminsdk-fbsvc-e4867a9f8b.json
 *firebase-adminsdk*.json
+.env
