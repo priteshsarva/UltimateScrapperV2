@@ -1,29 +1,37 @@
-// Gemini layer for the WhatsApp bot. Two jobs, both optional — if the key is
-// missing, the quota is spent or Google errors, everything falls back to the
-// plain keyword matching + "ask the owner" flow.
-//   1. answerWithAi()  — a question the keyword matcher missed: pick a saved
-//      answer, or answer from the business profile + that client's own data.
-//   2. polish()        — the owner's typed answer: fix spelling/grammar and
-//      write it in all three languages before it's saved as a FAQ.
-// The business profile is admin-editable (app_settings key 'wa_business').
+// Gemini layer for the WhatsApp bot — it holds the whole conversation.
+// No menus, no language prompt: the model reads the chat and replies like a person,
+// in whatever language the client is using. Everything it may say comes from
+// portal/kartify-guide.md, the owner's saved answers, and that client's own data.
+// If the key is missing, the quota is spent or Google errors, the caller falls back
+// to keyword matching and then to asking the owner — the bot never goes silent.
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { query } from "./db.js";
 
 // flash-lite: the free tier allows many more requests per minute than plain
 // "gemini-flash-latest" (which currently maps to a model capped at 5/min).
 const MODEL = process.env.WA_GEMINI_MODEL || "gemini-flash-lite-latest";
-const DAILY_MAX = Number(process.env.WA_AI_DAILY_MAX || 400);   // free-tier guard
+const DAILY_MAX = Number(process.env.WA_AI_DAILY_MAX || 1500);
 const TIMEOUT_MS = 20000;
+const GUIDE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "kartify-guide.md");
 
-// Shown in the admin screen when nothing is saved yet — edit it there, not here.
-export const DEFAULT_PROFILE = `Kartify (thekartify.com) — we run online clothing/footwear stores for shop owners in India.
-What we do:
-- Hosted online store: we build and host the store at <name>.thekartify.com, or on your own domain.
-- Products: we supply the catalogue from our verified sources. The owner picks categories; products, photos and prices update automatically.
-- WooCommerce plugin: if the owner already has a WordPress site, our plugin pulls the same products into it.
-- Orders come to the store owner over WhatsApp; payment by UPI.
-Plans: Free (try it), Standard ₹4000/month (full store), Search the product ₹100/month (catalogue search only).
-Getting started: sign up on the portal, pick a plan and categories, we approve the store, it goes live the same day.
-We do not hold stock for the owner; we ship from our sources after an order is confirmed.`;
+let guideCache = { at: 0, text: "" };
+function guide() {
+  if (Date.now() - guideCache.at > 60e3) {
+    try { guideCache = { at: Date.now(), text: fs.readFileSync(GUIDE_PATH, "utf8") }; }
+    catch { guideCache = { at: Date.now(), text: "" }; }
+  }
+  return guideCache.text;
+}
+
+// Extra notes the admin adds in the portal, appended to the guide.
+export async function extraNotes() {
+  try {
+    const row = (await query(`select value from app_settings where key='wa_business'`)).rows[0];
+    return (row?.value?.profile || "").trim();
+  } catch { return ""; }
+}
 
 let used = { date: "", n: 0 };
 const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
@@ -33,14 +41,7 @@ function spend() {
   used.n++;
   return true;
 }
-export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: !!process.env.GEMINI_API_KEY });
-
-export async function businessProfile() {
-  try {
-    const row = (await query(`select value from app_settings where key='wa_business'`)).rows[0];
-    return (row?.value?.profile || "").trim() || DEFAULT_PROFILE;
-  } catch { return DEFAULT_PROFILE; }
-}
+export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: !!process.env.GEMINI_API_KEY, model: MODEL });
 
 // One Gemini call -> parsed JSON, or null on any problem (never throws).
 // 503/429 ("high demand") is common and clears in a second, so it gets one retry.
@@ -53,7 +54,7 @@ async function ask(prompt, retry = true) {
       headers: { "Content-Type": "application/json", "X-goog-api-key": key },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.2, responseMimeType: "application/json", maxOutputTokens: 800 },
+        generationConfig: { temperature: 0.7, responseMimeType: "application/json", maxOutputTokens: 900 },
       }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
@@ -71,79 +72,82 @@ async function ask(prompt, retry = true) {
   } catch (e) { console.error("[wa-ai]", e.message); return null; }
 }
 
-const LANG_NAME = { en: "English", hinglish: "Hinglish (Hindi written in English letters)", hi: "Hindi (Devanagari)" };
-
-// Compact, readable facts about the sender. Option A: the model sees the
-// client's own account so it can answer "when does my plan expire" style questions.
 function clientFacts(contact) {
-  if (!contact?.user) return "This number is NOT linked to a verified account. Do not invent account details.";
-  const l = [`Name: ${contact.user.name || "unknown"}`, `Email: ${contact.user.email || "none"}`];
+  if (!contact?.user) return "Not a registered client yet (this number has no verified account). Treat them as a new prospect.";
+  const l = [`Registered client. Name: ${contact.user.name || "unknown"}`];
   for (const s of contact.sites || []) l.push(`Store: ${s.slug || s.domain} (${s.type}), status ${s.status}${s.plan ? `, plan ${s.plan}` : ""}, expires ${s.expiry_date || "n/a"}`);
-  for (const i of contact.invoices || []) l.push(`Unpaid invoice ${i.invoice_no || ""}: ${i.item} ₹${i.amount} (${i.status})`);
-  for (const o of (contact.orders || []).slice(0, 3)) l.push(`Order ${o.order_no}: ${o.status}, ₹${o.total}, ${o.buyer_name}`);
+  for (const i of contact.invoices || []) l.push(`Unpaid invoice ${i.invoice_no || ""}: ${i.item} ₹${i.amount}`);
+  for (const o of (contact.orders || []).slice(0, 3)) l.push(`Order ${o.order_no}: ${o.status}, ₹${o.total}`);
   return l.join("\n");
 }
 
-// faqs: [{ id, phrases[], answer_en, answer_hinglish, answer_hi }]
-// -> { faq_id } | { answer } | null (null = hand it to the owner)
-export async function answerWithAi({ question, lang, faqs, contact }) {
-  const list = faqs.slice(0, 80).map((f) =>
-    `#${f.id} asked as: ${(f.phrases || []).join(" | ").slice(0, 200)}\n   answer: ${(f.answer_hinglish || f.answer_en || f.answer_hi || "").slice(0, 300)}`
+const PLAYBOOK = `HOW YOU TALK
+- You are a real person from the Kartify team on WhatsApp. Never say you are a bot, an AI or an assistant.
+- Write the way people actually write on WhatsApp: 1-3 short sentences, warm, simple, no bullet points,
+  no headings, no emoji spam (one is plenty, often none), no formal letter language.
+- NEVER give numbered menus or ask them to "choose an option". Just talk.
+- Mirror their language and script exactly: Hinglish gets Hinglish, Hindi script gets Hindi script,
+  English gets English. If they switch, you switch.
+- Ask ONE question at a time, then wait. Never interrogate.
+- Do not repeat a greeting in every message, and do not re-introduce yourself mid-conversation.
+- Use their name rarely — at most once in a while, not in every message.
+
+HOW YOU SELL (you are a helpful shop-owner friend, not a salesman)
+- Early on, get to know them like a person: how their day/business is going, what they sell,
+  where their customers come from, whether they already sell online.
+- Listen for the problem behind what they say — no online presence, customers only from the local area,
+  stock money stuck, no time or skill to build a site, no product photos.
+- Reflect that problem back in their own words, then show what it is costing them. Do the arithmetic
+  ONLY with numbers THEY gave you (for example: "20 customers a day walk past and you're only
+  reaching the ones nearby"). If you have no numbers, ask for one instead of inventing any.
+- Then show the other side: with a ready store they can sell beyond their area, with no stock to buy,
+  no photos to shoot, and the margin they set is theirs.
+- Invite the next small step: seeing a sample store, or signing up free at app.thekartify.com.
+
+PRICING RULE (important)
+- Do NOT mention any price, plan or cost until they ask about it.
+- When they DO ask, start with the simplest option: they can start free and see the platform.
+- Give the detailed plan prices only if they ask again or ask directly what it costs.
+- Never offer discounts, never negotiate, never promise a delivery date or an earnings figure.
+
+WHEN TO HAND OVER TO THE OWNER (set "escalate": true)
+- Discounts, price negotiation, refunds, complaints, custom deals, anything about someone else's account.
+- Anything the guide and the saved answers do not cover, or anything you are unsure about.
+- When they ask to speak to a person.
+- When you escalate, your "reply" should be a natural line saying you'll check with the team and
+  come back shortly — never a made-up answer.`;
+
+// history: [{ role: 'client'|'us', text }] oldest first
+// -> { reply, lang, escalate, action } | null
+export async function converse({ question, history = [], faqs = [], contact, name }) {
+  const saved = faqs.slice(0, 60).map((f) =>
+    `- asked as: ${(f.phrases || []).join(" | ").slice(0, 160)}\n  answer: ${(f.answer_hinglish || f.answer_en || f.answer_hi || "").slice(0, 300)}`
   ).join("\n");
+  const chat = history.slice(-12).map((m) => `${m.role === "client" ? "THEM" : "YOU"}: ${m.text}`).join("\n");
+  const notes = await extraNotes();
 
-  const out = await ask(
-`You are the WhatsApp support assistant for this business. Reply like a helpful Indian shop owner: short, warm, WhatsApp-style, 1-4 sentences, no markdown headings.
+  return ask(
+`${PLAYBOOK}
 
-BUSINESS
-${await businessProfile()}
+WHAT YOU KNOW ABOUT THE BUSINESS (never say anything outside this)
+${guide()}
+${notes ? `\nEXTRA NOTES FROM THE OWNER\n${notes}` : ""}
 
-SAVED ANSWERS (the owner's own words — prefer these)
-${list || "(none yet)"}
+THE OWNER'S OWN SAVED ANSWERS (use these words when they fit)
+${saved || "(none yet)"}
 
-THIS CLIENT
-${clientFacts(contact)}
+WHO YOU ARE TALKING TO
+${name ? `WhatsApp name: ${name}\n` : ""}${clientFacts(contact)}
 
-RULES
-- Use ONLY the business description, the saved answers and this client's facts above.
-- Never invent prices, discounts, refund terms, delivery dates or promises.
-- If a saved answer fits, return its id in use_faq and leave answer empty.
-- If the question is about this client's account, answer from their facts.
-- If the question is not covered, or asks for a decision only the owner can make, set confident=false.
-- Discounts, price negotiation, refunds, complaints, custom deals and deadlines are ALWAYS confident=false — the owner handles those, so do not accept or refuse them yourself.
-- Write the answer in ${LANG_NAME[lang] || LANG_NAME.hinglish}.
+CONVERSATION SO FAR
+${chat || "(this is their first message)"}
 
-CLIENT'S QUESTION
+THEIR NEW MESSAGE
 "${question}"
 
-Return JSON: {"use_faq": <id or null>, "answer": "<text or empty>", "confident": <true|false>}`);
-
-  if (!out) return null;
-  if (out.use_faq && faqs.some((f) => f.id === Number(out.use_faq))) return { faq_id: Number(out.use_faq) };
-  if (out.confident && String(out.answer || "").trim()) return { answer: String(out.answer).trim() };
-  return null;
-}
-
-// The owner's raw answer -> tidy text in all three languages.
-// Returns null on failure; the caller then saves the raw text as typed.
-export async function polish({ text, lang }) {
-  const out = await ask(
-`The shop owner typed this reply to a customer on WhatsApp. Clean it up and write it in three languages.
-
-BUSINESS
-${await businessProfile()}
-
-OWNER'S REPLY (may have typos or shorthand; it was meant as ${LANG_NAME[lang] || "Hinglish"})
-"${text}"
-
-RULES
-- Keep the owner's meaning and any numbers/links EXACTLY as given. Never add facts, offers or promises.
-- Fix spelling and grammar, make it polite and clear, WhatsApp style, 1-4 sentences.
-- hinglish = Hindi written in English letters (natural, not a literal translation).
-
-Return JSON: {"en": "...", "hinglish": "...", "hi": "..."}`);
-
-  if (!out) return null;
-  const pick = (v) => String(v || "").trim();
-  const r = { answer_en: pick(out.en), answer_hinglish: pick(out.hinglish), answer_hi: pick(out.hi) };
-  return (r.answer_en || r.answer_hinglish || r.answer_hi) ? r : null;
+Reply as JSON:
+{"reply": "<your WhatsApp message>",
+ "lang": "<en|hinglish|hi — the language you replied in>",
+ "escalate": <true if the owner must handle this>,
+ "action": "<pay_link if they want to pay a pending invoice now, else empty>"}`);
 }

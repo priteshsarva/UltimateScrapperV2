@@ -9,7 +9,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { bestMatch } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
-import { answerWithAi, polish, businessProfile, DEFAULT_PROFILE, aiUsage } from "./waGemini.js";
+import { converse, extraNotes, aiUsage } from "./waGemini.js";
 import { saveSettings } from "./settings.js";
 
 const APP_URL = process.env.APP_URL || "http://localhost:5174";
@@ -123,36 +123,79 @@ waInternalRoutes.post("/invoices/:id/pay-link", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ponytail: rows are kept, not trimmed — a few thousand short texts is nothing.
+async function remember(jid, role, text) {
+  if (!jid || !String(text || "").trim()) return;
+  await query(`insert into wa_messages (jid, role, text) values ($1,$2,$3)`, [jid, role, String(text).slice(0, 2000)]);
+}
+
 const faqAnswer = async (id, lang) => {
   const faq = (await query(`update wa_faqs set hits = hits + 1 where id=$1 returning *`, [id])).rows[0];
   return faq ? pickAnswer(faq, lang) : null;
 };
 
-// Keyword match first (free, instant). Only what it misses goes to Gemini, which
-// either points at a saved answer or answers from the profile + this client's data.
-waInternalRoutes.post("/match", async (req, res) => {
+// The whole conversation. The bot posts what the client said and gets back what to
+// say — or escalate:true, meaning the owner must answer this one.
+// Falls back to keyword matching, then to the owner, whenever Gemini is unavailable.
+waInternalRoutes.post("/reply", async (req, res) => {
   try {
-    const { text, lang, phone } = req.body || {};
+    const { text, phone, jid, name } = req.body || {};
+    if (!jid || !text) return res.status(400).json({ error: "jid and text required" });
+    await remember(jid, "client", text);
+
+    const [history, faqs, contact] = await Promise.all([
+      query(`select role, text from (select id, role, text from wa_messages where jid=$1 order by id desc limit 13) h order by id`, [jid]),
+      query(`select f.id, f.answer_en, f.answer_hinglish, f.answer_hi,
+                    coalesce(array_agg(p.phrase) filter (where p.id is not null), '{}') as phrases
+               from wa_faqs f left join wa_faq_phrases p on p.faq_id = f.id
+              group by f.id order by f.hits desc limit 60`),
+      contactFor(phone),
+    ]);
+
+    const ai = await converse({
+      question: text, name,
+      history: history.rows.slice(0, -1),   // the newest row is this same message
+      faqs: faqs.rows, contact,
+    });
+
+    if (ai?.reply) {
+      const lang = LANGS.includes(ai.lang) ? ai.lang : "hinglish";
+      if (contact.phone) await query(
+        `insert into wa_contacts (phone, lang) values ($1,$2)
+         on conflict (phone) do update set lang=excluded.lang, updated_at=now()`, [contact.phone, lang]);
+
+      let reply = ai.reply.trim();
+      if (ai.action === "pay_link" && contact.invoices?.length) {
+        const inv = (await query(`select * from invoices where id=$1`, [contact.invoices[0].id])).rows[0];
+        const r = inv ? await startInvoicePayment(inv).catch(() => ({})) : {};
+        reply += `\n${r.payment_url || `${APP_URL}/billing`}`;
+      }
+      if (!ai.escalate) {
+        await remember(jid, "us", reply);
+        // Logged so the owner can see in the portal what the assistant said on its own.
+        await query(
+          `insert into wa_questions (phone, jid, user_id, name, text, lang, status, answer, source, answered_at)
+           values ($1,$2,$3,$4,$5,$6,'answered',$7,'ai', now())`,
+          [digits(phone), jid, contact.user?.id || null, name || null, text, lang, reply]);
+        return res.json({ reply, lang, source: "ai" });
+      }
+      return res.json({ reply, lang, escalate: true, source: "ai" });
+    }
+
+    // Gemini unavailable: fall back to the owner's saved wording, else ask the owner.
     const m = bestMatch(text, await phrases());
-    if (m) return res.json({ faq_id: m.faq_id, score: m.score, answer: await faqAnswer(m.faq_id, lang) });
-
-    const faqs = (await query(
-      `select f.id, f.answer_en, f.answer_hinglish, f.answer_hi,
-              coalesce(array_agg(p.phrase) filter (where p.id is not null), '{}') as phrases
-         from wa_faqs f left join wa_faq_phrases p on p.faq_id = f.id
-        group by f.id order by f.hits desc limit 80`)).rows;
-    const ai = await answerWithAi({ question: text, lang, faqs, contact: await contactFor(phone) });
-    if (!ai) return res.json({ answer: null });
-    if (ai.faq_id) return res.json({ faq_id: ai.faq_id, source: "ai", answer: await faqAnswer(ai.faq_id, lang) });
-
-    // Log what the AI said on its own, so the owner can see it in the portal and correct it.
-    await query(
-      `insert into wa_questions (phone, jid, user_id, name, text, lang, status, answer, source, answered_at)
-       values ($1,$2,$3,$4,$5,$6,'answered',$7,'ai', now())`,
-      [digits(phone), req.body?.jid || "", (await userByPhone(phone))?.id || null, req.body?.name || null,
-       text, LANGS.includes(lang) ? lang : "hinglish", ai.answer]);
-    res.json({ source: "ai", answer: ai.answer });
+    if (m) {
+      const answer = await faqAnswer(m.faq_id, contact.lang);
+      if (answer) { await remember(jid, "us", answer); return res.json({ reply: answer, faq_id: m.faq_id, source: "faq" }); }
+    }
+    res.json({ reply: null, escalate: true, source: "none" });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// What the bot actually sent (owner answers, follow-ups) — keeps the memory honest.
+waInternalRoutes.post("/sent", async (req, res) => {
+  await remember(req.body?.jid, "us", req.body?.text);
+  res.json({ ok: true });
 });
 
 waInternalRoutes.post("/questions", async (req, res) => {
@@ -189,7 +232,7 @@ waInternalRoutes.post("/answer", async (req, res) => {
 
     if (fix) {
       if (!String(text || "").trim()) return res.status(400).json({ error: "empty correction" });
-      const versions = (await polish({ text, lang: q.lang })) || langColumns(text, q.lang);
+      const versions = langColumns(text, q.lang);   // sent exactly as the owner typed it
       const faq = q.faq_id
         ? (await query(`update wa_faqs set answer_en=$1, answer_hinglish=$2, answer_hi=$3, updated_at=now() where id=$4 returning *`,
             [versions.answer_en, versions.answer_hinglish, versions.answer_hi, q.faq_id])).rows[0]
@@ -215,7 +258,7 @@ waInternalRoutes.post("/answer", async (req, res) => {
       if (!faq) return res.status(404).json({ error: `FAQ ${faq_id} not found` });
     } else {
       if (!String(text || "").trim()) return res.status(400).json({ error: "empty answer" });
-      versions = (await polish({ text, lang: q.lang })) || langColumns(text, q.lang);
+      versions = langColumns(text, q.lang);          // owner's words, never rewritten
       faq = (await query(`insert into wa_faqs (answer_en, answer_hinglish, answer_hi) values ($1,$2,$3) returning *`,
         [versions.answer_en, versions.answer_hinglish, versions.answer_hi])).rows[0];
     }
@@ -240,8 +283,9 @@ waInternalRoutes.post("/chats/event", async (req, res) => {
     const phone = digits(req.body?.phone);
     if (!jid || !["in", "out"].includes(dir)) return res.status(400).json({ error: "jid and dir required" });
     let chat = (await query(
-      `select * from wa_chats where jid=$1 or ($2 <> '' and phone=$2)
-        order by (status='legacy') desc, (jid=$1) desc limit 1`, [jid, phone])).rows[0];
+      `select c.*, ct.lang from wa_chats c left join wa_contacts ct on ct.phone = c.phone
+        where c.jid=$1 or ($2 <> '' and c.phone=$2)
+        order by (c.status='legacy') desc, (c.jid=$1) desc limit 1`, [jid, phone])).rows[0];
     const created = !chat;
     if (!chat) {
       chat = (await query(
@@ -342,15 +386,15 @@ waAdminRoutes.use(requireAuth, requireAdmin);
 
 waAdminRoutes.get("/status", (req, res) => res.json({ ...botStatus, ai: aiUsage() }));
 
-// The business description the AI answers from. Empty = the built-in default.
+// Extra notes added on top of portal/kartify-guide.md (the assistant's main knowledge).
 waAdminRoutes.get("/business", async (req, res) => {
-  res.json({ profile: await businessProfile(), default_profile: DEFAULT_PROFILE });
+  res.json({ notes: await extraNotes() });
 });
 
 waAdminRoutes.put("/business", async (req, res) => {
   try {
-    await saveSettings("wa_business", { profile: String(req.body?.profile || "").trim() });
-    res.json({ profile: await businessProfile() });
+    await saveSettings("wa_business", { profile: String(req.body?.notes ?? req.body?.profile ?? "").trim() });
+    res.json({ notes: await extraNotes() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

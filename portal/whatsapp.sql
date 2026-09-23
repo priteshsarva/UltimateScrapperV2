@@ -65,3 +65,14 @@ create index if not exists idx_wa_chats_phone on wa_chats(phone);
 
 -- Who produced the answer: 'owner' (you typed it) or 'ai' (Gemini answered on its own).
 alter table wa_questions add column if not exists source text not null default 'owner';
+
+-- Short conversation memory so the assistant can hold a real conversation
+-- (last ~12 turns per chat are sent to the model; older rows are only history).
+create table if not exists wa_messages (
+  id         bigserial primary key,
+  jid        text not null,
+  role       text not null check (role in ('client','us')),
+  text       text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_wa_messages_jid on wa_messages(jid, id desc);
