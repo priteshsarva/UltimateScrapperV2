@@ -151,7 +151,12 @@ waInternalRoutes.post("/reply", async (req, res) => {
     await remember(jid, "client", text);
 
     const [history, faqs, contact] = await Promise.all([
-      query(`select role, text from (select id, role, text from wa_messages where jid=$1 order by id desc limit 13) h order by id`, [jid]),
+      // Only today's thread: a conversation from days ago is a different conversation,
+      // and dragging its tone (or the old menu bot's) into a fresh chat reads badly.
+      query(`select role, text from (
+               select id, role, text from wa_messages
+                where jid=$1 and created_at > now() - interval '20 hours'
+                order by id desc limit 9) h order by id`, [jid]),
       query(`select f.id, f.answer_en, f.answer_hinglish, f.answer_hi,
                     coalesce(array_agg(p.phrase) filter (where p.id is not null), '{}') as phrases
                from wa_faqs f left join wa_faq_phrases p on p.faq_id = f.id
@@ -173,6 +178,7 @@ waInternalRoutes.post("/reply", async (req, res) => {
 
       let reply = ai.reply.trim();
       let products = [];
+      const linkedRecently = history.rows.slice(-4).some((h) => h.role === "us" && h.text.includes("://"));
       // Product photos + a portal link: the funnel. No prices here — prices are on the portal.
       if (ai.action === "show_products") {
         const q = String(ai.product_query || text).slice(0, 60);
@@ -184,7 +190,10 @@ waInternalRoutes.post("/reply", async (req, res) => {
                     p.catName && `Category: ${p.catName}`,
                     `👉 ${APP_URL}/?q=${encodeURIComponent(p.name || q)}`].filter(Boolean).join("\n"),
         }));
-        reply += `\n\n${PORTAL_LINE[lang] || PORTAL_LINE.hinglish} 👉 ${APP_URL}/?q=${encodeURIComponent(q)}`;
+        // The photos already carry a link each — only add the "whole range" line if we
+        // haven't just sent a link, so the chat doesn't turn into link spam.
+        if (!linkedRecently && !reply.includes("://"))
+          reply += `\n\n${PORTAL_LINE[lang] || PORTAL_LINE.hinglish} 👉 ${APP_URL}/?q=${encodeURIComponent(q)}`;
       }
       if (ai.action === "pay_link" && contact.invoices?.length) {
         const inv = (await query(`select * from invoices where id=$1`, [contact.invoices[0].id])).rows[0];
@@ -210,6 +219,18 @@ waInternalRoutes.post("/reply", async (req, res) => {
       if (answer) { await remember(jid, "us", answer); return res.json({ reply: answer, faq_id: m.faq_id, source: "faq" }); }
     }
     res.json({ reply: null, escalate: true, source: "none" });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Forget a chat's conversation so the next message starts clean (owner: "reset <number>").
+waInternalRoutes.post("/forget", async (req, res) => {
+  try {
+    const last10 = digits(req.body?.phone).slice(-10);
+    const jids = req.body?.jid ? [req.body.jid]
+      : (await query(`select jid from wa_chats where right(phone,10)=$1`, [last10])).rows.map((r) => r.jid);
+    if (!jids.length) return res.json({ cleared: 0 });
+    const r = await query(`delete from wa_messages where jid = any($1)`, [jids]);
+    res.json({ cleared: r.rowCount });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
