@@ -43,9 +43,22 @@ function spend() {
 }
 export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: !!process.env.GEMINI_API_KEY, model: MODEL });
 
+// Gemini calls run one at a time, spaced out: the free tier limits requests per
+// MINUTE, and three clients typing at once would otherwise burn the quota and get
+// nothing back. A queued call still beats "sorry, please try again".
+let chain = Promise.resolve();
+const MIN_GAP_MS = Number(process.env.WA_AI_GAP_MS || 1200);
+function serialize(fn) {
+  const run = chain.then(fn, fn);
+  chain = run.then(() => new Promise((s) => setTimeout(s, MIN_GAP_MS)), () => new Promise((s) => setTimeout(s, MIN_GAP_MS)));
+  return run;
+}
+
 // One Gemini call -> parsed JSON, or null on any problem (never throws).
 // 503/429 ("high demand") is common and clears in a second, so it gets one retry.
-async function ask(prompt, retry = true) {
+const ask = (prompt) => serialize(() => askNow(prompt));
+
+async function askNow(prompt, retry = true) {
   const key = process.env.GEMINI_API_KEY;
   if (!key || !spend()) return null;
   try {
@@ -54,7 +67,7 @@ async function ask(prompt, retry = true) {
       headers: { "Content-Type": "application/json", "X-goog-api-key": key },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, responseMimeType: "application/json", maxOutputTokens: 900 },
+        generationConfig: { temperature: 0.7, responseMimeType: "application/json", maxOutputTokens: 400 },
       }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
@@ -63,15 +76,22 @@ async function ask(prompt, retry = true) {
       console.error("[wa-ai]", r.status, j?.error?.message || "");
       if (retry && (r.status === 503 || r.status === 429)) {
         await new Promise((s) => setTimeout(s, 1500));
-        return ask(prompt, false);
+        return askNow(prompt, false);
       }
       return null;
     }
     const text = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
-    return text ? JSON.parse(text.replace(/^```json\s*|\s*```$/g, "")) : null;
+    if (!text) return null;
+    const clean = text.replace(/^```json\s*|\s*```$/g, "");
+    try { return JSON.parse(clean); }
+    catch {
+      // Cut off mid-JSON: salvage the reply rather than losing the whole turn.
+      const m = clean.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      return m ? { reply: JSON.parse(`"${m[1]}"`) } : null;
+    }
   } catch (e) {
     console.error("[wa-ai]", e.message);
-    if (retry) { await new Promise((s) => setTimeout(s, 1500)); return ask(prompt, false); }  // timeouts/network blips
+    if (retry) { await new Promise((s) => setTimeout(s, 1500)); return askNow(prompt, false); }  // timeouts/network blips
     return null;
   }
 }
