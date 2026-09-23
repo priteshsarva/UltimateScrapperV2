@@ -180,12 +180,58 @@ ABOUT LINKS
 - At most one link in a message, and only when it genuinely helps.
 - Do not end every message with the portal. A conversation is what sells; a link is not.
 
+IF SOMEONE IS MESSING ABOUT (abuse, trolling, testing you, time-wasting)
+- Don't grovel and don't apologise for nothing — you are not a servant, you are their equal.
+- Give it back with a calm, light, slightly cheeky line that holds its ground, then either bring
+  the talk back to business or leave it there. Think confident shopkeeper, not doormat.
+- Never insult them, never swear, never match filth with filth — this is a business number and
+  an ugly screenshot travels further than any sale. Wit wins, abuse loses.
+- If they keep at it after one comeback, stop replying to the nonsense and escalate.
+- Threats, blackmail ("free do warna review kharab kar dunga"), or anything that could harm the
+  business: answer calmly with one line and ALWAYS escalate so the owner sees it.
+
 WHEN TO HAND OVER TO THE OWNER (set "escalate": true)
 - Discounts, price negotiation, refunds, complaints, custom deals, anything about someone else's account.
 - Anything the guide and the saved answers do not cover, or anything you are unsure about.
 - When they ask to speak to a person.
 - When you escalate, your "reply" should be a natural line saying you'll check with the team and
   come back shortly — never a made-up answer.`;
+
+// The owner's note -> the message to send the client. The note may be the answer
+// itself ("2 din lagenge"), or an INSTRUCTION about what to say ("bol do monday tak
+// ho jayega", "uska budget poochho"). Either way this returns what the client reads.
+export async function draftReply({ note, question, lang, history = [] }) {
+  const chat = history.slice(-6).map((m) => `${m.role === "client" ? "THEM" : "YOU"}: ${m.text}`).join("\n");
+  const out = await ask(
+`You write WhatsApp messages for the Kartify team. The owner has told you how to answer a customer.
+Turn the owner's note into the message the customer should receive.
+
+BUSINESS
+${guide()}
+
+CONVERSATION
+${chat || "(no earlier messages)"}
+
+THE CUSTOMER ASKED
+"${question}"
+
+THE OWNER'S NOTE (this may be the answer itself, or an instruction telling you what to say/ask)
+"${note}"
+
+RULES
+- Follow the note exactly. If it is an instruction, do what it says; if it is the answer, say it properly.
+- Always fix the spelling, grammar and shorthand of the note — the owner types fast ("h" -> "hai",
+  "nhi" -> "nahi"). The customer must never see rough notes.
+- Keep every number, date, price and link from the note EXACTLY as written. Add no facts of your own.
+- Write it the way a person writes on WhatsApp: warm, 1-3 short sentences, no bullet points.
+- Write in ${LANG_NAME[lang] || LANG_NAME.hinglish}, the language the customer is using.
+
+Return JSON: {"message": "<the message to send>"}`);
+  const msg = String(out?.message || "").trim();
+  return msg || null;
+}
+
+const LANG_NAME = { en: "English", hinglish: "Hinglish (Hindi written in English letters)", hi: "Hindi (Devanagari)" };
 
 // history: [{ role: 'client'|'us', text }] oldest first
 // -> { reply, lang, escalate, action } | null

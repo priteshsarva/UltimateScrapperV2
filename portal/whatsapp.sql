@@ -76,3 +76,8 @@ create table if not exists wa_messages (
   created_at timestamptz not null default now()
 );
 create index if not exists idx_wa_messages_jid on wa_messages(jid, id desc);
+
+-- Owner answers are drafted into a proper client message first, shown to the owner,
+-- and only sent once they confirm. draft_msg_id = the preview message they can quote-reply.
+alter table wa_questions add column if not exists draft        text;
+alter table wa_questions add column if not exists draft_msg_id text;

@@ -9,7 +9,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { bestMatch } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
-import { converse, extraNotes, aiUsage } from "./waGemini.js";
+import { converse, draftReply, extraNotes, aiUsage } from "./waGemini.js";
 import { searchCatalogue } from "./catalogueSearch.js";
 import { saveSettings } from "./settings.js";
 
@@ -255,7 +255,9 @@ waInternalRoutes.post("/questions", async (req, res) => {
 });
 
 waInternalRoutes.patch("/questions/:id", async (req, res) => {
-  await query(`update wa_questions set owner_msg_id=$1 where id=$2`, [req.body?.owner_msg_id || null, req.params.id]);
+  const { owner_msg_id, draft_msg_id } = req.body || {};
+  if (draft_msg_id) await query(`update wa_questions set draft_msg_id=$1 where id=$2`, [draft_msg_id, req.params.id]);
+  if (owner_msg_id) await query(`update wa_questions set owner_msg_id=$1 where id=$2`, [owner_msg_id, req.params.id]);
   res.json({ ok: true });
 });
 
@@ -265,10 +267,13 @@ waInternalRoutes.patch("/questions/:id", async (req, res) => {
 // fix -> rewrite the answer of an already-answered question (no message to the client).
 waInternalRoutes.post("/answer", async (req, res) => {
   try {
-    const { id, owner_msg_id, text, faq_id, skip, fix } = req.body || {};
+    const { id, owner_msg_id, text, faq_id, skip, fix, confirm, raw } = req.body || {};
+    // A plain "ok" with nothing quoted means the draft we just showed them.
     const q = (await query(
-      id ? `select * from wa_questions where id=$1` : `select * from wa_questions where owner_msg_id=$1`,
-      [id || owner_msg_id || ""]
+      id ? `select * from wa_questions where id=$1`
+        : owner_msg_id ? `select * from wa_questions where owner_msg_id=$1 or draft_msg_id=$1 order by id desc limit 1`
+        : `select * from wa_questions where status='pending' and draft is not null order by id desc limit 1`,
+      id || owner_msg_id ? [id || owner_msg_id] : []
     )).rows[0];
     if (!q) return res.status(404).json({ error: "question not found" });
 
@@ -299,8 +304,22 @@ waInternalRoutes.post("/answer", async (req, res) => {
       faq = (await query(`select * from wa_faqs where id=$1`, [faq_id])).rows[0];
       if (!faq) return res.status(404).json({ error: `FAQ ${faq_id} not found` });
     } else {
-      if (!String(text || "").trim()) return res.status(400).json({ error: "empty answer" });
-      versions = langColumns(text, q.lang);          // owner's words, never rewritten
+      // Step 1: the owner's note becomes a draft message, shown to them first.
+      // Their note can be the answer OR an instruction ("bol do kal ho jayega").
+      if (!confirm) {
+        if (!String(text || "").trim()) return res.status(400).json({ error: "empty answer" });
+        const history = (await query(
+          `select role, text from (select id, role, text from wa_messages where jid=$1 order by id desc limit 6) h order by id`,
+          [q.jid])).rows;
+        const draft = raw ? text.trim()
+          : (await draftReply({ note: text, question: q.text, lang: q.lang, history })) || text.trim();
+        await query(`update wa_questions set draft=$1 where id=$2`, [draft, q.id]);
+        return res.json({ question: q, draft, drafted: true });
+      }
+      // Step 2: confirmed — send it.
+      const final = String(text || q.draft || "").trim();
+      if (!final) return res.status(400).json({ error: "nothing to send" });
+      versions = langColumns(final, q.lang);
       faq = (await query(`insert into wa_faqs (answer_en, answer_hinglish, answer_hi) values ($1,$2,$3) returning *`,
         [versions.answer_en, versions.answer_hinglish, versions.answer_hi])).rows[0];
     }
