@@ -179,8 +179,10 @@ waInternalRoutes.post("/reply", async (req, res) => {
         const found = await searchCatalogue({ q, stock: "in", limit: 3 }).catch(() => ({ results: [] }));
         products = (found.results || []).filter((p) => p.image).slice(0, 3).map((p) => ({
           image: p.image,
+          // Each photo links to that exact product on the portal (search prefilled with its name).
           caption: [p.name, p.brand && `Brand: ${p.brand}`, p.sizes?.length && `Sizes: ${p.sizes.slice(0, 8).join(", ")}`,
-                    p.catName && `Category: ${p.catName}`].filter(Boolean).join("\n"),
+                    p.catName && `Category: ${p.catName}`,
+                    `👉 ${APP_URL}/?q=${encodeURIComponent(p.name || q)}`].filter(Boolean).join("\n"),
         }));
         reply += `\n\n${PORTAL_LINE[lang] || PORTAL_LINE.hinglish} 👉 ${APP_URL}/?q=${encodeURIComponent(q)}`;
       }
