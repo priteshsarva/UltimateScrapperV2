@@ -1,7 +1,7 @@
 // Gemini layer for the WhatsApp bot — it holds the whole conversation.
 // No menus, no language prompt: the model reads the chat and replies like a person,
 // in whatever language the client is using. Everything it may say comes from
-// portal/kartify-guide.md, the owner's saved answers, and that client's own data.
+// portal/knowledge/*.md (core + the topic manual that matches), the owner's saved answers,
 // If the key is missing, the quota is spent or Google errors, the caller falls back
 // to keyword matching and then to asking the owner — the bot never goes silent.
 import fs from "fs";
@@ -14,15 +14,43 @@ import { query } from "./db.js";
 const MODEL = process.env.WA_GEMINI_MODEL || "gemini-flash-lite-latest";
 const DAILY_MAX = Number(process.env.WA_AI_DAILY_MAX || 1500);
 const TIMEOUT_MS = 30000;
-const GUIDE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "kartify-guide.md");
+const KNOWLEDGE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "knowledge");
 
-let guideCache = { at: 0, text: "" };
-function guide() {
-  if (Date.now() - guideCache.at > 60e3) {
-    try { guideCache = { at: Date.now(), text: fs.readFileSync(GUIDE_PATH, "utf8") }; }
-    catch { guideCache = { at: Date.now(), text: "" }; }
-  }
-  return guideCache.text;
+// knowledge/00-core.md goes with every request; the rest are topic manuals and only
+// the ones matching what they asked are attached. Sending all of them every time
+// would make each call slow and burn the free quota for nothing.
+const TOPICS = [
+  ["10-onboarding.md",       /sign ?up|signup|register|account|khata|join|shuru|start kaise|kaise judu|otp|profile/i],
+  ["20-storefront.md",       /store|storefront|website|site|shop bana|logo|banner|theme|colou?r|design|domain|preview|live|edit|slug|badge|save|setup step|wizard|go live|publish/i],
+  ["30-catalogue.md",        /product|catalog|catalogue|search|categor|brand|supplier|source|stock|size|maal|saman|item|collection/i],
+  ["40-orders.md",           /order|buyer|customer|checkout|dispatch|status|confirm|pending|cancel/i],
+  ["45-shipping-returns.md", /ship|deliver|courier|track|return|refund|exchange|damag|cod|parcel|wapas|vapas/i],
+  ["50-money.md",            /price|pricing|cost|charge|plan|payment|invoice|bill|renew|expir|margin|payout|paisa|rupee|₹|kitna|kharch|free/i],
+  ["60-plugin.md",           /plugin|wordpress|woo|sync|api key|enrollment key|install/i],
+  ["70-account.md",          /login|log in|password|forgot|mobile change|number change|delete account|support|help|staff/i],
+];
+const MAX_TOPICS = 2;
+
+const fileCache = new Map();  // name -> { at, text }
+function readKnowledge(name) {
+  const hit = fileCache.get(name);
+  if (hit && Date.now() - hit.at < 60e3) return hit.text;
+  let text = "";
+  try { text = fs.readFileSync(path.join(KNOWLEDGE_DIR, name), "utf8"); } catch { text = ""; }
+  fileCache.set(name, { at: Date.now(), text });
+  return text;
+}
+
+// core + the best-matching topic manuals for what they just asked
+export function knowledge(question = "") {
+  const q = String(question);
+  const picked = TOPICS
+    .map(([file, re]) => ({ file, hits: (q.match(new RegExp(re.source, "gi")) || []).length }))
+    .filter((t) => t.hits > 0)
+    .sort((a, b) => b.hits - a.hits)
+    .slice(0, MAX_TOPICS)
+    .map((t) => t.file);
+  return [readKnowledge("00-core.md"), ...picked.map(readKnowledge)].filter(Boolean).join("\n\n");
 }
 
 // Extra notes the admin adds in the portal, appended to the guide.
@@ -207,7 +235,7 @@ export async function draftReply({ note, question, lang, history = [] }) {
 Turn the owner's note into the message the customer should receive.
 
 BUSINESS
-${guide()}
+${knowledge(`${question} ${note}`)}
 
 CONVERSATION
 ${chat || "(no earlier messages)"}
@@ -246,7 +274,7 @@ export async function converse({ question, history = [], faqs = [], contact, nam
 `${PLAYBOOK}
 
 WHAT YOU KNOW ABOUT THE BUSINESS (never say anything outside this)
-${guide()}
+${knowledge(`${question} ${chat}`)}
 ${notes ? `\nEXTRA NOTES FROM THE OWNER\n${notes}` : ""}
 
 THE OWNER'S OWN SAVED ANSWERS (use these words when they fit)
@@ -266,5 +294,15 @@ Reply as JSON:
  "lang": "<en|hinglish|hi — the language you replied in>",
  "escalate": <true if the owner must handle this>,
  "action": "<show_products if they are asking to see a product/brand/category, pay_link if they want to pay a pending invoice now, else empty>",
- "product_query": "<when action=show_products: just the product or brand words, e.g. \\"nike sneakers\\">"}`);
+ "product_query": "<when action=show_products: just the product or brand words, e.g. \\"nike sneakers\\">",
+ "lead": {"name":"","business":"","city":"","sells":"","shops":"","online_already":"","email":"","socials":"","suppliers":"","budget_hint":"","intent":""},
+ "score": "<hot|warm|cold>",
+ "score_reason": "<one short line: why>"}
+
+LEAD NOTES
+- Fill "lead" with anything you have learned SO FAR in this chat (from all of it, not just the last
+  message). Leave a field "" if they haven't said it. Never guess, never invent.
+- Work these out through normal conversation, one at a time — never send a form or a list of questions.
+- score: hot = has a real shop AND wants to start / asked price / gave contact. warm = interested,
+  still asking. cold = just browsing, testing, or not a shop owner.`);
 }

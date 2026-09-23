@@ -81,3 +81,27 @@ create index if not exists idx_wa_messages_jid on wa_messages(jid, id desc);
 -- and only sent once they confirm. draft_msg_id = the preview message they can quote-reply.
 alter table wa_questions add column if not exists draft        text;
 alter table wa_questions add column if not exists draft_msg_id text;
+
+-- What we learn about a person while talking to them: filled in by the assistant
+-- from the conversation itself (never an interrogation), one row per number.
+create table if not exists wa_leads (
+  phone         text primary key,
+  jid           text,
+  name          text,
+  business      text,
+  city          text,
+  sells         text,          -- what they sell
+  shops         text,          -- how many shops / scale
+  online_already text,         -- already selling online? where?
+  email         text,
+  socials       text,          -- instagram / facebook / website
+  suppliers     text,          -- suppliers they named
+  budget_hint   text,
+  intent        text,          -- what they want / where the talk got to
+  score         text not null default 'cold' check (score in ('hot','warm','cold')),
+  score_reason  text,
+  notes         text,
+  updated_at    timestamptz not null default now(),
+  created_at    timestamptz not null default now()
+);
+create index if not exists idx_wa_leads_score on wa_leads(score, updated_at desc);

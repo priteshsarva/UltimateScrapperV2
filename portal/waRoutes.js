@@ -136,6 +136,24 @@ async function remember(jid, role, text) {
   await query(`insert into wa_messages (jid, role, text) values ($1,$2,$3)`, [jid, role, String(text).slice(0, 2000)]);
 }
 
+// What the assistant picked up about this person. Only ever fills blanks in or
+// updates with something new — a later message must not wipe what we already knew.
+const LEAD_FIELDS = ["name", "business", "city", "sells", "shops", "online_already", "email", "socials", "suppliers", "budget_hint", "intent"];
+async function saveLead(phone, jid, ai) {
+  const p = digits(phone);
+  if (!p || !ai?.lead) return;
+  const vals = LEAD_FIELDS.map((f) => String(ai.lead[f] || "").trim().slice(0, 300) || null);
+  const score = ["hot", "warm", "cold"].includes(ai.score) ? ai.score : "cold";
+  await query(
+    `insert into wa_leads (phone, jid, ${LEAD_FIELDS.join(", ")}, score, score_reason)
+     values ($1,$2,${LEAD_FIELDS.map((_, i) => `$${i + 3}`).join(",")},$${LEAD_FIELDS.length + 3},$${LEAD_FIELDS.length + 4})
+     on conflict (phone) do update set
+       ${LEAD_FIELDS.map((f) => `${f} = coalesce(excluded.${f}, wa_leads.${f})`).join(", ")},
+       score = excluded.score, score_reason = excluded.score_reason,
+       jid = coalesce(excluded.jid, wa_leads.jid), updated_at = now()`,
+    [p, jid || null, ...vals, score, String(ai.score_reason || "").slice(0, 300) || null]);
+}
+
 const faqAnswer = async (id, lang) => {
   const faq = (await query(`update wa_faqs set hits = hits + 1 where id=$1 returning *`, [id])).rows[0];
   return faq ? pickAnswer(faq, lang) : null;
@@ -176,6 +194,7 @@ waInternalRoutes.post("/reply", async (req, res) => {
         `insert into wa_contacts (phone, lang) values ($1,$2)
          on conflict (phone) do update set lang=excluded.lang, updated_at=now()`, [contact.phone, lang]);
 
+      saveLead(phone, jid, ai).catch((e) => console.error("lead", e.message));
       let reply = ai.reply.trim();
       let products = [];
       const linkedRecently = history.rows.slice(-4).some((h) => h.role === "us" && h.text.includes("://"));
@@ -426,6 +445,17 @@ waInternalRoutes.post("/chats/followed-up", async (req, res) => {
   res.json({ ok: true });
 });
 
+// New/updated leads for the owner's daily digest.
+waInternalRoutes.get("/leads/new", async (req, res) => {
+  const hours = Math.max(1, Number(req.query.hours) || 24);
+  const rows = (await query(
+    `select phone, name, business, city, sells, shops, score, score_reason
+       from wa_leads where updated_at > now() - make_interval(hours => $1)
+      order by case score when 'hot' then 1 when 'warm' then 2 else 3 end, updated_at desc
+      limit 25`, [hours])).rows;
+  res.json({ leads: rows });
+});
+
 // Escalations the owner hasn't answered for `hours` — for the daily reminder.
 waInternalRoutes.get("/questions/stale", async (req, res) => {
   const hours = Math.max(1, Number(req.query.hours) || 24);
@@ -506,6 +536,15 @@ waAdminRoutes.get("/questions", async (req, res) => {
     `select q.*, u.email from wa_questions q left join users u on u.id = q.user_id
       where q.status=$1 order by q.created_at desc limit 200`, [status])).rows;
   res.json({ questions: rows });
+});
+
+waAdminRoutes.get("/leads", async (req, res) => {
+  const score = ["hot", "warm", "cold"].includes(req.query.score) ? req.query.score : null;
+  const rows = (await query(
+    `select * from wa_leads ${score ? "where score=$1" : ""}
+      order by case score when 'hot' then 1 when 'warm' then 2 else 3 end, updated_at desc limit 300`,
+    score ? [score] : [])).rows;
+  res.json({ leads: rows });
 });
 
 // "Test the matcher" box in the admin screen.
