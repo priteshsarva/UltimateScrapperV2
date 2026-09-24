@@ -263,6 +263,16 @@ waInternalRoutes.post("/questions", async (req, res) => {
   try {
     const { phone, jid, name, text, lang } = req.body || {};
     if (!jid || !text) return res.status(400).json({ error: "jid and text required" });
+    // Don't ask the owner the same thing twice: if an identical question is already
+    // pending a reply (any chat), return that one so the bot points the owner at it
+    // instead of opening a duplicate — which would later become a duplicate FAQ.
+    const norm = String(text).toLowerCase().replace(/\s+/g, " ").trim();
+    const dup = (await query(
+      `select id from wa_questions
+        where status='pending' and btrim(regexp_replace(lower(text), '\\s+', ' ', 'g')) = $1
+        order by id desc limit 1`, [norm]
+    )).rows[0];
+    if (dup) return res.json({ id: dup.id, duplicate: true });
     const user = await userByPhone(phone);
     const q = (await query(
       `insert into wa_questions (phone, jid, user_id, name, text, lang)

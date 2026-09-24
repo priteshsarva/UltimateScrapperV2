@@ -13,7 +13,7 @@ import { query } from "./db.js";
 // "gemini-flash-latest" (which currently maps to a model capped at 5/min).
 const MODEL = process.env.WA_GEMINI_MODEL || "gemini-flash-lite-latest";
 const DAILY_MAX = Number(process.env.WA_AI_DAILY_MAX || 1500);
-const TIMEOUT_MS = 30000;
+const TIMEOUT_MS = Number(process.env.WA_AI_TIMEOUT_MS || 12000);
 const KNOWLEDGE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "knowledge");
 
 // knowledge/00-core.md goes with every request; the rest are topic manuals and only
@@ -93,7 +93,19 @@ const keys = () => (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY ||
   .split(",").map((k) => k.trim()).filter(Boolean);
 let keyTurn = 0;
 
+// Circuit breaker: when Gemini is overloaded (503) or timing out, stop calling it for a
+// cooldown instead of hammering it on every message. Hammering just spams the log, burns
+// the daily quota, and — because calls are serialized — backs up the whole reply queue.
+// While the breaker is open, callers fall straight through to saved answers / owner escalation.
+const FAIL_TRIP = Number(process.env.WA_AI_FAIL_TRIP || 4);
+const COOLDOWN_MS = Number(process.env.WA_AI_COOLDOWN_MS || 60000);
+let fails = 0, cooldownUntil = 0;
+function noteFail() {
+  if (++fails >= FAIL_TRIP) { cooldownUntil = Date.now() + COOLDOWN_MS; fails = 0; console.error(`[wa-ai] pausing Gemini ${Math.round(COOLDOWN_MS / 1000)}s after repeated errors`); }
+}
+
 async function askNow(prompt, retry = true) {
+  if (Date.now() < cooldownUntil) return null;   // breaker open: skip Gemini, use fallback
   const pool = keys();
   const key = pool[keyTurn++ % pool.length];
   if (!key || !spend()) return null;
@@ -116,10 +128,12 @@ async function askNow(prompt, retry = true) {
         await new Promise((s) => setTimeout(s, pool.length > 1 ? 200 : 1500));
         return askNow(prompt, false);
       }
+      noteFail();
       return null;
     }
     const text = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
     if (!text) return null;
+    fails = 0;   // a good answer clears the breaker
     const clean = text.replace(/^```json\s*|\s*```$/g, "");
     try { return JSON.parse(clean); }
     catch {
@@ -130,6 +144,7 @@ async function askNow(prompt, retry = true) {
   } catch (e) {
     console.error("[wa-ai]", e.message);
     if (retry) { await new Promise((s) => setTimeout(s, 1500)); return askNow(prompt, false); }  // timeouts/network blips
+    noteFail();
     return null;
   }
 }
