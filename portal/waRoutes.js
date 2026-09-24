@@ -7,7 +7,7 @@ import { Router } from "express";
 import crypto from "crypto";
 import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
-import { bestMatch, worthLearning } from "./waMatch.js";
+import { bestMatch, worthLearning, isStalling } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
 import { converse, draftReply, reengage, extraNotes, aiUsage } from "./waGemini.js";
 import { searchCatalogue } from "./catalogueSearch.js";
@@ -221,6 +221,12 @@ waInternalRoutes.post("/reply", async (req, res) => {
          on conflict (phone) do update set lang=excluded.lang, updated_at=now()`, [contact.phone, lang]);
 
       saveLead(phone, jid, ai).catch((e) => console.error("lead", e.message));
+      // The model sometimes answers with "team se confirm karke batata hoon" instead of
+      // escalating. That line is never sent: it becomes a silent hand-off to the owner.
+      if (!ai.escalate && isStalling(ai.reply)) {
+        console.log(`[wa] dropped a stalling reply, handing to owner: "${String(ai.reply).slice(0, 80)}"`);
+        ai.escalate = true;
+      }
       if (ai.escalate) return res.json({ reply: "", lang, escalate: true, score, source: "ai" });
       let reply = String(ai.reply).trim();
       let products = [];
@@ -261,7 +267,8 @@ waInternalRoutes.post("/reply", async (req, res) => {
     const m = bestMatch(text, await phrases());
     if (m) {
       const answer = await faqAnswer(m.faq_id, contact.lang);
-      if (answer) { await remember(jid, "us", answer); return res.json({ reply: answer, faq_id: m.faq_id, source: "faq" }); }
+      // an old saved answer that just stalls is worse than the silent hand-off below
+      if (answer && !isStalling(answer)) { await remember(jid, "us", answer); return res.json({ reply: answer, faq_id: m.faq_id, source: "faq" }); }
     }
     res.json({ reply: null, escalate: true, source: "none" });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -534,7 +541,8 @@ waInternalRoutes.get("/chats/reengage", async (req, res) => {
       const history = (await query(
         `select role, text from (select id, role, text from wa_messages where jid=$1 order by id desc limit 8) h order by id`,
         [q.jid])).rows;
-      const text = (await reengage({ history, contact: await contactFor(q.phone), lang: q.lang, pendingQuestion: q.text }))
+      const ai = await reengage({ history, contact: await contactFor(q.phone), lang: q.lang, pendingQuestion: q.text });
+      const text = (ai && !isStalling(ai) ? ai : null)                                  // never a "let me check" line
         || REENGAGE_FALLBACK[q.lang]?.[q.id % 3] || REENGAGE_FALLBACK.hinglish[q.id % 3];   // Gemini down too
       await remember(q.jid, "us", text);
       return { jid: q.jid, text };

@@ -90,10 +90,24 @@ export function bestMatch(text, phrases, threshold = MATCH_THRESHOLD) {
 const PERSONAL = /₹|\bINV-|\bORD-|expir|invoice|\border\b/i;
 export function worthLearning({ question = "", answer = "", action = "" } = {}) {
   if (action) return false;                          // show_products / pay_link replies
+  if (isStalling(answer)) return false;              // never learn "let me check and get back"
   if (question.trim().length < 12 || answer.trim().length < 20) return false;
   if (PERSONAL.test(answer)) return false;
   return normalize(question).length >= 2;            // not a greeting or "ok thanks"
 }
+
+// A reply that stalls instead of answering: "team se confirm karke batata hoon",
+// "let me check and get back to you". The owner never wants these sent — the model is
+// told not to, but a rule in a prompt isn't a guarantee, so the server checks too.
+// Plain "batata hoon" is NOT enough on its own: "main aapko batata hoon kaise kaam
+// karta hai" is a real answer. Only phrases that promise to come back later count.
+const STALL = new RegExp([
+  "team se", "confirm kar(ke|ke\\s|ne|\\s?ke)", "check kar(ke|ne|\\s?ke)", "pata kar(ke|\\s?ke)",
+  "po+c?hh?(\\s?ke|kar)", "pu+chh?\\s?ke", "thodi der (me|mein) bata", "baad me(in)? bata",
+  "get back to you", "check with (the|my|our) team", "let me (check|confirm|find out)", "i'?ll (check|confirm) and",
+  "टीम से", "पूछकर", "पूछ के", "पता करके", "कन्फर्म करके",
+].join("|"), "i");
+export const isStalling = (text) => STALL.test(String(text || ""));
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   const assert = (await import("assert")).strict;
@@ -113,5 +127,13 @@ if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   assert.equal(W("iska price", "Aapka invoice ₹4,000 ka hai."), false);                                             // personal
   assert.equal(W("ok thanks bhai", "Theek hai ji, koi baat nahi. Kabhi bhi poochh lijiye."), false);                 // no content
   assert.equal(W("nike ke shoes dikhao", "Haan ji, yeh dekhiye kuch options.", "show_products"), false);             // one-off
+  // stalling lines are caught...
+  for (const s of ["Main team se confirm karke abhi batata hoon.", "Team se baat karke bata hu", "ek min, check karke batata hoon ji",
+                   "Let me check with the team and get back to you.", "मैं टीम से पूछकर अभी बताता हूँ।", "poochh ke batata hu"])
+    assert.equal(isStalling(s), true, s);
+  // ...but real answers that happen to say "batata hoon" are not
+  for (const s of ["Main aapko batata hoon kaise kaam karta hai — products ready milte hain.",
+                   "Delivery 1 se 3 din me ho jati hai ji.", "Standard plan ₹4,000 per month ka hai."])
+    assert.equal(isStalling(s), false, s);
   console.log("waMatch ok");
 }
