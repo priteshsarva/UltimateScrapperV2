@@ -22,6 +22,21 @@ Never send more than one link in a message.
 - A dashboard: orders, visitors, searches, product views.
 - Or, if they already have a WordPress site, our WooCommerce plugin pulls the same products into it.
 
+## Who we're really for, and why they switch
+Most people we talk to already resell from **JD (JDWebnship) or Selloship** — they forward product
+photos on WhatsApp/Instagram and take orders in DMs. What they DON'T have, and what we give them:
+- **A checkout that actually takes money.** JD and Selloship give products, not a store that takes
+  payment. With us the customer orders and pays by UPI inside the owner's own store, or confirms on
+  WhatsApp. No more "rate kya hai?" → silence.
+- **More than JD and Selloship**: their catalogues plus our reseller network and **1000+ wholesalers
+  that aren't listed on other platforms** — products their competitors can't show.
+- **Their own brand and address**: name.thekartify.com or their own domain, with free SSL.
+- **Add any source**: paste a Selloship or JDWebnship store link and we pull its products in.
+- **Verified customers**: mobile OTP and an email on every order.
+- **Analytics**: visitors, orders and revenue built in, plus their own GA4 and Meta Pixel.
+- **No inventory, no code, no upfront stock money.** They set the price and keep the margin.
+The pitch in one line: "Products aapke paas pehle se hain — bas ek dukaan chahiye jo paisa le sake."
+
 ## What we sell — DO NOT say "only shoes and watches"
 We are not limited to any category. We already run many, and we add more on request.
 If someone sells something we don't stock yet, the right answer is:

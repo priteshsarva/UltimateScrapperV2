@@ -9,7 +9,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { bestMatch, worthLearning } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
-import { converse, draftReply, extraNotes, aiUsage } from "./waGemini.js";
+import { converse, draftReply, reengage, extraNotes, aiUsage } from "./waGemini.js";
 import { searchCatalogue } from "./catalogueSearch.js";
 import { saveSettings } from "./settings.js";
 
@@ -210,14 +210,19 @@ waInternalRoutes.post("/reply", async (req, res) => {
       faqs: faqs.rows, contact,
     });
 
-    if (ai?.reply) {
+    // Gemini answered. An escalation now comes back with an EMPTY reply on purpose (the
+    // assistant stays silent instead of saying "let me check"), so test for the object,
+    // not the text — otherwise escalations fall into the Gemini-is-down branch below.
+    if (ai && (String(ai.reply || "").trim() || ai.escalate)) {
       const lang = LANGS.includes(ai.lang) ? ai.lang : "hinglish";
+      const score = ["hot", "warm", "cold"].includes(ai.score) ? ai.score : null;
       if (contact.phone) await query(
         `insert into wa_contacts (phone, lang) values ($1,$2)
          on conflict (phone) do update set lang=excluded.lang, updated_at=now()`, [contact.phone, lang]);
 
       saveLead(phone, jid, ai).catch((e) => console.error("lead", e.message));
-      let reply = ai.reply.trim();
+      if (ai.escalate) return res.json({ reply: "", lang, escalate: true, score, source: "ai" });
+      let reply = String(ai.reply).trim();
       let products = [];
       const linkedRecently = history.rows.slice(-4).some((h) => h.role === "us" && h.text.includes("://"));
       // Product photos + a portal link: the funnel. No prices here — prices are on the portal.
@@ -241,18 +246,15 @@ waInternalRoutes.post("/reply", async (req, res) => {
         const r = inv ? await startInvoicePayment(inv).catch(() => ({})) : {};
         reply += `\n${r.payment_url || `${APP_URL}/billing`}`;
       }
-      if (!ai.escalate) {
-        await remember(jid, "us", reply);
-        // Logged so the owner can see in the portal what the assistant said on its own.
-        await query(
-          `insert into wa_questions (phone, jid, user_id, name, text, lang, status, answer, source, answered_at)
-           values ($1,$2,$3,$4,$5,$6,'answered',$7,'ai', now())`,
-          [digits(phone), jid, contact.user?.id || null, name || null, text, lang, reply]);
-        // Keep it as a saved answer, so this question survives the next Gemini outage.
-        learnFromAi({ question: text, answer: reply, lang, action: ai.action }).catch((e) => console.error("learn", e.message));
-        return res.json({ reply, lang, products, source: "ai" });
-      }
-      return res.json({ reply, lang, escalate: true, source: "ai" });
+      await remember(jid, "us", reply);
+      // Logged so the owner can see in the portal what the assistant said on its own.
+      await query(
+        `insert into wa_questions (phone, jid, user_id, name, text, lang, status, answer, source, answered_at)
+         values ($1,$2,$3,$4,$5,$6,'answered',$7,'ai', now())`,
+        [digits(phone), jid, contact.user?.id || null, name || null, text, lang, reply]);
+      // Keep it as a saved answer, so this question survives the next Gemini outage.
+      learnFromAi({ question: text, answer: reply, lang, action: ai.action }).catch((e) => console.error("learn", e.message));
+      return res.json({ reply, lang, products, score, source: "ai" });
     }
 
     // Gemini unavailable: fall back to the owner's saved wording, else ask the owner.
@@ -488,6 +490,88 @@ waInternalRoutes.get("/leads/new", async (req, res) => {
       order by case score when 'hot' then 1 when 'warm' then 2 else 3 end, updated_at desc
       limit 25`, [hours])).rows;
   res.json({ leads: rows });
+});
+
+// Used only when Gemini is down at the moment a chat needs picking back up. Each moves
+// the talk to their shop instead of mentioning the wait; the question id picks one, so
+// the same person doesn't get the same line twice in a row.
+const REENGAGE_FALLBACK = {
+  hinglish: [
+    "Waise aapki shop kahan hai, aur zyada customer kahan se aate hain — aas-paas se ya bahar se bhi?",
+    "Ek baat batao, abhi aap WhatsApp pe products share karke bechte ho kya?",
+    "Aap roz lagbhag kitne customers handle karte ho shop pe?",
+  ],
+  en: [
+    "By the way, where's your shop, and do most customers come from nearby or further out?",
+    "Quick one — do you already share products with customers on WhatsApp?",
+    "Roughly how many customers do you serve in a day?",
+  ],
+  hi: [
+    "वैसे आपकी दुकान कहाँ है, और ज़्यादातर ग्राहक आस-पास से आते हैं या दूर से भी?",
+    "एक बात बताइए, क्या आप अभी WhatsApp पर प्रोडक्ट भेजकर बेचते हैं?",
+    "आप रोज़ लगभग कितने ग्राहकों को संभालते हैं?",
+  ],
+};
+
+// Chats left hanging: a question went to the owner `mins` ago, they haven't answered,
+// and we haven't said anything since. Returns a fresh line that restarts the talk from
+// another angle, so the client isn't left staring at their own message.
+waInternalRoutes.get("/chats/reengage", async (req, res) => {
+  try {
+    const mins = Math.max(5, Number(req.query.mins) || 15);
+    const rows = (await query(
+      `select distinct on (q.jid) q.id, q.jid, q.phone, q.text, q.lang
+         from wa_questions q join wa_chats c on c.jid = q.jid
+        where q.status='pending' and not c.opted_out and c.status='active'
+          and q.created_at < now() - make_interval(mins => $1)
+          and q.created_at > now() - interval '6 hours'
+          and (c.last_out_at is null or c.last_out_at < q.created_at)
+        order by q.jid, q.id desc limit 10`, [mins])).rows;
+
+    // In parallel: the AI pool spreads these across keys, and the bot's request to us
+    // times out at 90s — one-by-one with Google's 40s waits would blow past that.
+    const out = (await Promise.all(rows.slice(0, 5).map(async (q) => {
+      const history = (await query(
+        `select role, text from (select id, role, text from wa_messages where jid=$1 order by id desc limit 8) h order by id`,
+        [q.jid])).rows;
+      const text = (await reengage({ history, contact: await contactFor(q.phone), lang: q.lang, pendingQuestion: q.text }))
+        || REENGAGE_FALLBACK[q.lang]?.[q.id % 3] || REENGAGE_FALLBACK.hinglish[q.id % 3];   // Gemini down too
+      await remember(q.jid, "us", text);
+      return { jid: q.jid, text };
+    }))).filter(Boolean);
+    res.json({ chats: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// End-of-day numbers for the owner.
+waInternalRoutes.get("/report/today", async (req, res) => {
+  try {
+    const since = `now() - interval '${Math.max(1, Number(req.query.hours) || 24)} hours'`;
+    const one = async (sql, p = []) => (await query(sql, p)).rows;
+    const [msgs] = await one(`select
+        count(*) filter (where role='client')::int as incoming,
+        count(*) filter (where role='us')::int as sent,
+        count(distinct jid)::int as chats
+      from wa_messages where created_at > ${since}`);
+    const [qs] = await one(`select
+        count(*) filter (where source='ai')::int as answered_by_ai,
+        count(*) filter (where source='owner' and status='answered')::int as answered_by_you,
+        count(*) filter (where status='pending')::int as waiting_on_you
+      from wa_questions where created_at > ${since}`);
+    const [chats] = await one(`select
+        count(*) filter (where started_at > ${since})::int as new_chats,
+        count(*) filter (where started_at > ${since} and started_by='owner')::int as you_started,
+        count(*) filter (where opted_out)::int as opted_out_total
+      from wa_chats`);
+    const leads = await one(`select score, count(*)::int as n from wa_leads where updated_at > ${since} group by score`);
+    const hot = await one(
+      `select phone, name, business, city, sells, score, score_reason from wa_leads
+        where updated_at > ${since} and score in ('hot','warm')
+        order by case score when 'hot' then 1 else 2 end, updated_at desc limit 10`);
+    const pending = await one(
+      `select id, name, phone, text from wa_questions where status='pending' order by id desc limit 10`);
+    res.json({ msgs, qs, chats, leads, hot, pending });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Escalations the owner hasn't answered for `hours` — for the daily reminder.

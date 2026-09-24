@@ -15,10 +15,10 @@ const MODELS = (process.env.WA_GEMINI_MODELS || process.env.WA_GEMINI_MODEL || "
   .split(",").map((m) => m.trim()).filter(Boolean);
 const MODEL = MODELS[0];
 const DAILY_MAX = Number(process.env.WA_AI_DAILY_MAX || 1500);
-// 45s. Measured from the production box: DNS/connect/TLS are all ~5ms, but Google's
-// free tier parks the request — a two-character prompt took 41s to first byte. The
-// answers DO arrive, so a short timeout throws away work that was nearly done.
-const TIMEOUT_MS = Number(process.env.WA_AI_TIMEOUT_MS || 45000);
+// 28s, not 12s: with the knowledge + history in the prompt, a real answer measured
+// 19-36s when Google was busy. A short timeout turns answers that were on their way
+// into "aborted due to timeout" and wastes the attempt.
+const TIMEOUT_MS = Number(process.env.WA_AI_TIMEOUT_MS || 28000);
 const KNOWLEDGE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "knowledge");
 
 // knowledge/00-core.md goes with every request; the rest are topic manuals and only
@@ -76,15 +76,15 @@ function spend() {
 }
 export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: keys().length > 0, keys: keys().length, model: MODEL, models: MODELS });
 
-// A few calls at a time, not one. Strict serialization was right when we thought the
-// limit was requests-per-minute; the real bottleneck is Google sitting on each request
-// for up to 40s, so one-at-a-time means the 3rd person in a queue waits two minutes.
-// Each in-flight call uses a different key, so the per-project rate limit still holds.
-const CONCURRENCY = Number(process.env.WA_AI_CONCURRENCY || 3);
+// One call per key at a time: while key A waits on Google (which parks requests for
+// up to 40s), key B takes the next person's message. Add more keys in GEMINI_API_KEYS
+// and this widens by itself — no code change, no config change.
+const MAX_PARALLEL = Number(process.env.WA_AI_CONCURRENCY || 0);   // 0 = one per key
+const slots = () => Math.max(1, MAX_PARALLEL || Math.min(keys().length, 8));
 let inFlight = 0;
 const waiting = [];
 async function serialize(fn) {
-  if (inFlight >= CONCURRENCY) await new Promise((r) => waiting.push(r));
+  while (inFlight >= slots()) await new Promise((r) => waiting.push(r));
   inFlight++;
   try { return await fn(); }
   finally { inFlight--; waiting.shift()?.(); }
@@ -222,9 +222,23 @@ HOW YOU SELL (you are a helpful shop-owner friend, not a salesman)
   where their customers come from, whether they already sell online.
 - Listen for the problem behind what they say — no online presence, customers only from the local area,
   stock money stuck, no time or skill to build a site, no product photos.
-- Reflect that problem back in their own words, then show what it is costing them. Do the arithmetic
-  ONLY with numbers THEY gave you (for example: "20 customers a day walk past and you're only
-  reaching the ones nearby"). If you have no numbers, ask for one instead of inventing any.
+- Reflect that problem back in their own words, then show what it is costing them IN RUPEES.
+  Numbers persuade far better than adjectives, so get two numbers out of them early, one at a time:
+  roughly how many customers a day, and their average bill.
+- Then do the sum in front of them, out loud, using THEIR numbers only:
+  "25 customer × ₹800 = ₹20,000 din ka, ₹6 lakh mahine ka — aur yeh sirf wahi log hain jo dukaan
+  tak aa paate hain." Then the gap: "Jo log 10 km door hain unka ek rupaya bhi aapko nahi milta."
+  Then the upside, framed as a question, never a promise: "Agar mahine ke sirf 20 extra order bhi
+  online aa gaye, ₹800 ka average, toh ₹16,000 extra — plan ka kharcha usi me nikal jata hai."
+- NEVER invent a number they didn't give: no market sizes, no "70% log online khareedte hain",
+  no guaranteed income. If you don't have their numbers, ask for one — don't make one up.
+- Every projection must be conditional ("agar", "if") and modest. Promising earnings is forbidden.
+- THE RESELLER ANGLE (most people are JD / Selloship resellers selling through WhatsApp DMs):
+  ask how many people ask "rate kya hai" in a day, and how many of those actually order. The gap
+  is money that walked away. With THEIR numbers: "Roz 30 log poochhte hain, 5 order karte hain —
+  25 chale gaye. ₹300 margin ke hisaab se ₹7,500 roz, ₹2.25 lakh mahine ka. Yeh woh log hain jo
+  khud aapke paas aaye the." Then: a store where they can see everything and pay themselves.
+- Also worth quantifying with their numbers: hours a day spent forwarding photos one by one.
 - Then show the other side: with a ready store they can sell beyond their area, with no stock to buy,
   no photos to shoot, and the margin they set is theirs.
 - Invite the next small step: a look at thekartify.com, seeing a sample store, or — when they're
@@ -264,8 +278,41 @@ WHEN TO HAND OVER TO THE OWNER (set "escalate": true)
 - Discounts, price negotiation, refunds, complaints, custom deals, anything about someone else's account.
 - Anything the guide and the saved answers do not cover, or anything you are unsure about.
 - When they ask to speak to a person.
-- When you escalate, your "reply" should be a natural line saying you'll check with the team and
-  come back shortly — never a made-up answer.`;
+- When you escalate, leave "reply" EMPTY. Do not say "team se poochh ke bataata hoon", do not
+  promise to come back, do not stall — say nothing at all and let the owner answer. A salesman who
+  keeps saying "let me check" loses the room.`;
+
+// The owner hasn't answered a question we passed to them and the client is sitting in
+// silence. Pick the conversation back up from a DIFFERENT angle — never mention the wait.
+export async function reengage({ history = [], contact, lang, pendingQuestion = "" }) {
+  const chat = history.slice(-8).map((m) => `${m.role === "client" ? "THEM" : "YOU"}: ${m.text}`).join("\n");
+  const out = await ask(
+`${PLAYBOOK}
+
+WHAT YOU KNOW
+${knowledge(chat)}
+
+WHO YOU ARE TALKING TO
+${clientFacts(contact)}
+
+CONVERSATION SO FAR
+${chat || "(nothing yet)"}
+
+SITUATION
+They asked something you could not answer${pendingQuestion ? `: "${pendingQuestion}"` : ""}, and the reply
+is still coming. You are NOT going to answer that question now.
+
+WRITE ONE MESSAGE THAT:
+- picks the conversation up from a different, useful angle — their shop, what they sell, how they
+  reach customers today, or something concrete you CAN tell them about what we do
+- never mentions waiting, checking, the team, or their unanswered question
+- never apologises, never repeats anything already said in the chat
+- ends with one easy question, so replying takes them two seconds
+- is 1-2 short sentences in ${LANG_NAME[lang] || LANG_NAME.hinglish}
+
+Return JSON: {"reply": "<the message>"}`);
+  return String(out?.reply || "").trim() || null;
+}
 
 // The owner's note -> the message to send the client. The note may be the answer
 // itself ("2 din lagenge"), or an INSTRUCTION about what to say ("bol do monday tak
