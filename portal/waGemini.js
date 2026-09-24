@@ -2,16 +2,18 @@
 // No menus, no language prompt: the model reads the chat and replies like a person,
 // in whatever language the client is using. Everything it may say comes from
 // portal/knowledge/*.md (core + the topic manual that matches), the owner's saved answers,
-// If the key is missing, the quota is spent or Google errors, the caller falls back
+// and that client's own data. If the keys are spent or Google errors, the caller falls back
 // to keyword matching and then to asking the owner — the bot never goes silent.
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { query } from "./db.js";
 
-// flash-lite: the free tier allows many more requests per minute than plain
-// "gemini-flash-latest" (which currently maps to a model capped at 5/min).
-const MODEL = process.env.WA_GEMINI_MODEL || "gemini-flash-lite-latest";
+// Tried in order. Google's free tier throws 503 "high demand" on a busy model, so a
+// second model is the real fix — retrying the same one just fails again.
+const MODELS = (process.env.WA_GEMINI_MODELS || process.env.WA_GEMINI_MODEL || "gemini-flash-lite-latest,gemini-3.6-flash")
+  .split(",").map((m) => m.trim()).filter(Boolean);
+const MODEL = MODELS[0];
 const DAILY_MAX = Number(process.env.WA_AI_DAILY_MAX || 1500);
 const TIMEOUT_MS = Number(process.env.WA_AI_TIMEOUT_MS || 12000);
 const KNOWLEDGE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "knowledge");
@@ -69,7 +71,7 @@ function spend() {
   used.n++;
   return true;
 }
-export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: keys().length > 0, keys: keys().length, model: MODEL });
+export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: keys().length > 0, keys: keys().length, model: MODEL, models: MODELS });
 
 // Gemini calls run one at a time, spaced out: the free tier limits requests per
 // MINUTE, and three clients typing at once would otherwise burn the quota and get
@@ -84,8 +86,16 @@ function serialize(fn) {
 }
 
 // One Gemini call -> parsed JSON, or null on any problem (never throws).
-// 503/429 ("high demand") is common and clears in a second, so it gets one retry.
-const ask = (prompt) => serialize(() => askNow(prompt));
+// Each attempt uses the next key AND the next model, so a busy model or a spent
+// key is stepped over instead of retried into the ground.
+const ask = (prompt) => serialize(async () => {
+  for (let attempt = 0; attempt < MODELS.length + 1; attempt++) {
+    const out = await askNow(prompt, MODELS[attempt % MODELS.length]);
+    if (out) return out;
+    await new Promise((s) => setTimeout(s, 400));
+  }
+  return null;
+});
 
 // One or many keys: GEMINI_API_KEYS=key1,key2,key3 (GEMINI_API_KEY still works).
 // Each key has its own free quota, so a rate-limited call retries on the next key.
@@ -104,32 +114,27 @@ function noteFail() {
   if (++fails >= FAIL_TRIP) { cooldownUntil = Date.now() + COOLDOWN_MS; fails = 0; console.error(`[wa-ai] pausing Gemini ${Math.round(COOLDOWN_MS / 1000)}s after repeated errors`); }
 }
 
-async function askNow(prompt, retry = true) {
+async function askNow(prompt, model) {
   if (Date.now() < cooldownUntil) return null;   // breaker open: skip Gemini, use fallback
   const pool = keys();
   const key = pool[keyTurn++ % pool.length];
   if (!key || !spend()) return null;
+  // Gemini 3 models "think" before answering: that burns output tokens (the answer can
+  // come back empty at MAX_TOKENS) and costs seconds, so thinking is switched off there.
+  const gen = { temperature: 0.7, responseMimeType: "application/json", maxOutputTokens: 400 };
+  if (/gemini-3/.test(model)) { gen.maxOutputTokens = 1200; gen.thinkingConfig = { thinkingBudget: 0 }; }
   try {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-goog-api-key": key },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, responseMimeType: "application/json", maxOutputTokens: 400 },
-      }),
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: gen }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     const j = await r.json();
     if (!r.ok) {
-      console.error("[wa-ai]", r.status, j?.error?.message || "");
-      if (retry && (r.status === 503 || r.status === 429)) {
-        // Rate limited: the next call already uses the next key, so retry fast when
-        // there is more than one; wait a moment when there is only one.
-        await new Promise((s) => setTimeout(s, pool.length > 1 ? 200 : 1500));
-        return askNow(prompt, false);
-      }
+      console.error(`[wa-ai] ${model} ${r.status}`, (j?.error?.message || "").slice(0, 120));
       noteFail();
-      return null;
+      return null;   // the caller moves on to the next model/key
     }
     const text = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
     if (!text) return null;
@@ -142,8 +147,7 @@ async function askNow(prompt, retry = true) {
       return m ? { reply: JSON.parse(`"${m[1]}"`) } : null;
     }
   } catch (e) {
-    console.error("[wa-ai]", e.message);
-    if (retry) { await new Promise((s) => setTimeout(s, 1500)); return askNow(prompt, false); }  // timeouts/network blips
+    console.error(`[wa-ai] ${model}`, e.message);   // timeout / network blip
     noteFail();
     return null;
   }
