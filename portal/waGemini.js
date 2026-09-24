@@ -15,7 +15,10 @@ const MODELS = (process.env.WA_GEMINI_MODELS || process.env.WA_GEMINI_MODEL || "
   .split(",").map((m) => m.trim()).filter(Boolean);
 const MODEL = MODELS[0];
 const DAILY_MAX = Number(process.env.WA_AI_DAILY_MAX || 1500);
-const TIMEOUT_MS = Number(process.env.WA_AI_TIMEOUT_MS || 12000);
+// 45s. Measured from the production box: DNS/connect/TLS are all ~5ms, but Google's
+// free tier parks the request — a two-character prompt took 41s to first byte. The
+// answers DO arrive, so a short timeout throws away work that was nearly done.
+const TIMEOUT_MS = Number(process.env.WA_AI_TIMEOUT_MS || 45000);
 const KNOWLEDGE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "knowledge");
 
 // knowledge/00-core.md goes with every request; the rest are topic manuals and only
@@ -73,22 +76,24 @@ function spend() {
 }
 export const aiUsage = () => ({ ...used, max: DAILY_MAX, enabled: keys().length > 0, keys: keys().length, model: MODEL, models: MODELS });
 
-// Gemini calls run one at a time, spaced out: the free tier limits requests per
-// MINUTE, and three clients typing at once would otherwise burn the quota and get
-// nothing back. A queued call still beats "sorry, please try again".
-let chain = Promise.resolve();
-// With several keys the gap can be small — each call goes to a different key.
-const MIN_GAP_MS = Number(process.env.WA_AI_GAP_MS || 1200);
-function serialize(fn) {
-  const run = chain.then(fn, fn);
-  chain = run.then(() => new Promise((s) => setTimeout(s, MIN_GAP_MS)), () => new Promise((s) => setTimeout(s, MIN_GAP_MS)));
-  return run;
+// A few calls at a time, not one. Strict serialization was right when we thought the
+// limit was requests-per-minute; the real bottleneck is Google sitting on each request
+// for up to 40s, so one-at-a-time means the 3rd person in a queue waits two minutes.
+// Each in-flight call uses a different key, so the per-project rate limit still holds.
+const CONCURRENCY = Number(process.env.WA_AI_CONCURRENCY || 3);
+let inFlight = 0;
+const waiting = [];
+async function serialize(fn) {
+  if (inFlight >= CONCURRENCY) await new Promise((r) => waiting.push(r));
+  inFlight++;
+  try { return await fn(); }
+  finally { inFlight--; waiting.shift()?.(); }
 }
 
 // One Gemini call -> parsed JSON, or null on any problem (never throws).
 // Each attempt uses the next key AND the next model, so a busy model or a spent
 // key is stepped over instead of retried into the ground.
-const MAX_TRIES = Number(process.env.WA_AI_TRIES || 4);
+const MAX_TRIES = Number(process.env.WA_AI_TRIES || 3);   // 3 × 28s worst case, then fall back
 const ask = (prompt) => serialize(async () => {
   let tries = 0;
   // model OUTER, key INNER: keys and models must not rotate in lockstep, or a bad key
@@ -132,6 +137,8 @@ function noteFail() {
 async function askNow(prompt, model, key) {
   if (Date.now() < cooldownUntil) return null;   // breaker open: skip Gemini, use fallback
   if (!key || !spend()) return null;
+  const t0 = Date.now();
+  const secs = () => ((Date.now() - t0) / 1000).toFixed(1) + "s";
   // Gemini 3 models "think" before answering: that burns output tokens (the answer can
   // come back empty at MAX_TOKENS) and costs seconds, so thinking is switched off there.
   const gen = { temperature: 0.7, responseMimeType: "application/json", maxOutputTokens: 400 };
@@ -145,7 +152,7 @@ async function askNow(prompt, model, key) {
     });
     const j = await r.json();
     if (!r.ok) {
-      console.error(`[wa-ai] ${model} ${r.status} key…${key.slice(-6)}`, (j?.error?.message || "").slice(0, 100));
+      console.error(`[wa-ai] ${model} ${r.status} key…${key.slice(-6)} ${secs()}`, (j?.error?.message || "").slice(0, 100));
       if (r.status === 401 || r.status === 403) { dead.add(key); console.error(`[wa-ai] dropping bad key …${key.slice(-6)}`); }
       else noteFail();          // a rejected key is our config problem, not Google being down
       return null;              // the caller moves on to the next model/key
@@ -153,6 +160,7 @@ async function askNow(prompt, model, key) {
     const text = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
     if (!text) return null;
     fails = 0;   // a good answer clears the breaker
+    console.log(`[wa-ai] ${model} ok ${secs()}`);
     const clean = text.replace(/^```json\s*|\s*```$/g, "");
     try { return JSON.parse(clean); }
     catch {
@@ -161,7 +169,7 @@ async function askNow(prompt, model, key) {
       return m ? { reply: JSON.parse(`"${m[1]}"`) } : null;
     }
   } catch (e) {
-    console.error(`[wa-ai] ${model}`, e.message);   // timeout / network blip
+    console.error(`[wa-ai] ${model} ${secs()}`, e.message);   // timeout / network blip
     noteFail();
     return null;
   }
