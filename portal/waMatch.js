@@ -37,6 +37,7 @@ const STOP = new Set((
   "bhai bhaiya ji mera meri mere mujhe muje hum humne maine main mai me mein ka ki ke ko se hai h he hain ho hoga hua " +
   "tha thi kaise kese kaisay kaisa kya kyu kyun kab kaha kahan kar kare karu karna karne karo kiya karein raha rahi rahe " +
   "na to bhi aur ya ek koi batao bataye bata chahiye sakte sakta sakti skte apna apni apne yeh ye woh wo abhi namaste " +
+  "ok okay thanks thank thx thankyou shukriya dhanyavad hmm hm acha achha accha theek thik sahi done great nice " +
   "मेरा मेरी मेरे मुझे का की के को से है हैं हो कैसे क्या क्यों कब कहाँ कर करें करना करे रहा रही भी और या एक कोई जी भाई बताओ बताइए चाहिए सकते अपना यह वह अभी में"
 ).split(" "));
 
@@ -76,10 +77,22 @@ export function bestMatch(text, phrases, threshold = MATCH_THRESHOLD) {
   const q = normalize(text);
   let best = null;
   for (const p of phrases) {
-    const s = score(q, normalize(p.phrase));
+    // weight lets the owner's own answers win a close call against AI-learned ones
+    const s = score(q, normalize(p.phrase)) * (p.weight || 1);
     if (s >= threshold && (!best || s > best.score)) best = { faq_id: p.faq_id, score: s };
   }
   return best;
+}
+
+// Is this AI answer safe to keep as a general saved answer? Anything tied to one
+// person's account (their invoice, their order, their expiry) would be wrong for the
+// next person who asks, and product/payment replies carry one-off links.
+const PERSONAL = /₹|\bINV-|\bORD-|expir|invoice|\border\b/i;
+export function worthLearning({ question = "", answer = "", action = "" } = {}) {
+  if (action) return false;                          // show_products / pay_link replies
+  if (question.trim().length < 12 || answer.trim().length < 20) return false;
+  if (PERSONAL.test(answer)) return false;
+  return normalize(question).length >= 2;            // not a greeting or "ok thanks"
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
@@ -94,5 +107,11 @@ if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   assert.equal(bestMatch("ऑर्डर कैंसिल कैसे करें", P)?.faq_id, 1);
   assert.equal(bestMatch("naya prodct kaise dale", P)?.faq_id, 2);
   assert.equal(bestMatch("store live nahi hua", P), null);
+  const W = (q, a, action) => worthLearning({ question: q, answer: a, action });
+  assert.equal(W("delivery kitne din me hoti hai", "Delivery 1 se 3 din me ho jati hai ji, pure India me."), true);
+  assert.equal(W("mera plan kab khatam hoga", "Aapka Standard plan 1 October 2026 ko expire ho raha hai."), false); // personal
+  assert.equal(W("iska price", "Aapka invoice ₹4,000 ka hai."), false);                                             // personal
+  assert.equal(W("ok thanks bhai", "Theek hai ji, koi baat nahi. Kabhi bhi poochh lijiye."), false);                 // no content
+  assert.equal(W("nike ke shoes dikhao", "Haan ji, yeh dekhiye kuch options.", "show_products"), false);             // one-off
   console.log("waMatch ok");
 }

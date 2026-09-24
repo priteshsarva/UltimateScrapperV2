@@ -105,3 +105,8 @@ create table if not exists wa_leads (
   created_at    timestamptz not null default now()
 );
 create index if not exists idx_wa_leads_score on wa_leads(score, updated_at desc);
+
+-- Where a saved answer came from: 'owner' (you typed it) or 'ai' (learned from a
+-- conversation the assistant handled well). Learned ones are the offline safety net:
+-- when Gemini is down, the keyword matcher answers from these.
+alter table wa_faqs add column if not exists source text not null default 'owner';

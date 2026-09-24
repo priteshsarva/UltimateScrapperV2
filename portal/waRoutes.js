@@ -7,7 +7,7 @@ import { Router } from "express";
 import crypto from "crypto";
 import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
-import { bestMatch } from "./waMatch.js";
+import { bestMatch, worthLearning } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
 import { converse, draftReply, extraNotes, aiUsage } from "./waGemini.js";
 import { searchCatalogue } from "./catalogueSearch.js";
@@ -26,7 +26,10 @@ const digits = (p) => String(p || "").replace(/\D/g, "");
 // ---- phrase cache (every FAQ phrase; reloaded after any write) ----
 let phraseCache = null;
 async function phrases() {
-  if (!phraseCache) phraseCache = (await query(`select faq_id, phrase from wa_faq_phrases`)).rows;
+  // weight 1.1 for the owner's own answers: on a close match, their wording wins.
+  if (!phraseCache) phraseCache = (await query(
+    `select p.faq_id, p.phrase, case when f.source='owner' then 1.1 else 1 end as weight
+       from wa_faq_phrases p join wa_faqs f on f.id = p.faq_id`)).rows;
   return phraseCache;
 }
 const dropCache = () => { phraseCache = null; };
@@ -154,6 +157,25 @@ async function saveLead(phone, jid, ai) {
     [p, jid || null, ...vals, score, String(ai.score_reason || "").slice(0, 300) || null]);
 }
 
+// Remember a good AI answer so the bot can still reply when Gemini is down.
+// Only general questions are kept — anything tied to one person's account would be
+// wrong for the next person who asks. An answer we already have just gains a new phrasing.
+async function learnFromAi({ question, answer, lang, action }) {
+  const q = String(question || "").trim();
+  if (!worthLearning({ question: q, answer: String(answer || ""), action })) return;
+
+  const m = bestMatch(q, await phrases());
+  if (m) {                                                 // known question, new wording
+    const dup = (await query(`select 1 from wa_faq_phrases where faq_id=$1 and lower(phrase)=lower($2)`, [m.faq_id, q])).rows[0];
+    if (!dup) { await query(`insert into wa_faq_phrases (faq_id, phrase) values ($1,$2)`, [m.faq_id, q]); dropCache(); }
+    return;
+  }
+  const col = LANGS.includes(lang) ? lang : "hinglish";
+  const faq = (await query(`insert into wa_faqs (answer_${col}, source) values ($1,'ai') returning id`, [answer])).rows[0];
+  await query(`insert into wa_faq_phrases (faq_id, phrase) values ($1,$2)`, [faq.id, q]);
+  dropCache();
+}
+
 const faqAnswer = async (id, lang) => {
   const faq = (await query(`update wa_faqs set hits = hits + 1 where id=$1 returning *`, [id])).rows[0];
   return faq ? pickAnswer(faq, lang) : null;
@@ -226,6 +248,8 @@ waInternalRoutes.post("/reply", async (req, res) => {
           `insert into wa_questions (phone, jid, user_id, name, text, lang, status, answer, source, answered_at)
            values ($1,$2,$3,$4,$5,$6,'answered',$7,'ai', now())`,
           [digits(phone), jid, contact.user?.id || null, name || null, text, lang, reply]);
+        // Keep it as a saved answer, so this question survives the next Gemini outage.
+        learnFromAi({ question: text, answer: reply, lang, action: ai.action }).catch((e) => console.error("learn", e.message));
         return res.json({ reply, lang, products, source: "ai" });
       }
       return res.json({ reply, lang, escalate: true, source: "ai" });
