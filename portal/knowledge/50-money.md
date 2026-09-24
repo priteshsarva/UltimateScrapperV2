@@ -1,13 +1,15 @@
 # Money — plans, billing, shipping cost, the owner's margin
 
 ## Our plans
-- **Free**: catalogue search only. Good for looking at products and prices before committing.
-- **Standard ₹4,000/month**: the full hosted store. Everything is included except a payment gateway
-  (customers pay by UPI; the gateway is not part of the plan).
+- They can **start free**. **Standard is ₹4,000/month.** Shoppers pay by UPI inside the owner's store,
+  or confirm on WhatsApp.
+- What Free includes, whether a payment gateway comes with a plan, and per-plan features are being
+  finalised — don't state them; hand exact plan questions to the owner.
 - Monthly. An invoice appears in the portal before expiry; paid by UPI or the payment link.
 - **Grace period: 7 days** after expiry. If it stays unpaid after that, the store shuts down.
 - **No pausing** for a month. **No refund** on a month already paid.
-- **Plan changes mid-month are allowed** — the owner just asks and we switch it.
+- **Plan changes mid-month are allowed** — the portal locks the plan once a store is submitted, so the
+  owner just asks and we switch it.
 - **No setup fee and no hidden charges.** Extra work is only charged if the owner asks for something extra.
 - No GST number is needed to start, and we do not issue a GST invoice.
 

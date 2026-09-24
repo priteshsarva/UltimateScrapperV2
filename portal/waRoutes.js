@@ -7,7 +7,7 @@ import { Router } from "express";
 import crypto from "crypto";
 import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
-import { bestMatch, worthLearning, isStalling } from "./waMatch.js";
+import { bestMatch, worthLearning, isStalling, isOneOff } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
 import { converse, draftReply, reengage, extraNotes, aiUsage } from "./waGemini.js";
 import { searchCatalogue } from "./catalogueSearch.js";
@@ -21,7 +21,25 @@ const PORTAL_LINE = {
   hinglish: "Poora collection aur prices yahan dekhiye",
   hi: "पूरा कलेक्शन और प्राइस यहाँ देखिए",
 };
+// Asked for a product and nothing in stock came back: say so, never "haan ji, yeh dekhiye".
+const NOT_FOUND_LINE = {
+  en: "Can't see that in stock right now — have a look at the full range here",
+  hinglish: "Yeh abhi stock me nahi dikh raha — poora collection yahan dekh lijiye",
+  hi: "यह अभी स्टॉक में नहीं दिख रहा — पूरा कलेक्शन यहाँ देखिए",
+};
 const digits = (p) => String(p || "").replace(/\D/g, "");
+// What the bot escalates for a voice note / image with no caption: "[voice note]".
+const isMediaPlaceholder = (t) => /^\[[^\]]*\]$/.test(String(t || "").trim());
+// waGemini results come back as a plain string or as { reply | message, partial }.
+const textOf = (x) => String(typeof x === "string" || x instanceof String ? x : x?.reply ?? x?.message ?? "").trim();
+
+// Express 4 doesn't catch a rejected async handler, and Node exits on an unhandled
+// rejection — one Supabase blip in any route would take the whole backend (scraper,
+// sync-feed) down with it. Routes without their own try/catch go through this.
+const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
+  console.error(`[wa] ${req.method} ${req.originalUrl}`, e.message);
+  if (!res.headersSent) res.status(e.status || 500).json({ error: e.message });
+});
 
 // ---- phrase cache (every FAQ phrase; reloaded after any write) ----
 let phraseCache = null;
@@ -111,14 +129,14 @@ waInternalRoutes.get("/contact/:phone", async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-waInternalRoutes.put("/contact/:phone/lang", async (req, res) => {
+waInternalRoutes.put("/contact/:phone/lang", wrap(async (req, res) => {
   const lang = req.body?.lang;
   if (!LANGS.includes(lang)) return res.status(400).json({ error: "bad lang" });
   await query(
     `insert into wa_contacts (phone, lang) values ($1,$2)
      on conflict (phone) do update set lang=excluded.lang, updated_at=now()`, [digits(req.params.phone), lang]);
   res.json({ ok: true });
-});
+}));
 
 // Pay0 link for one of the sender's own unpaid invoices; billing page if the gateway fails.
 waInternalRoutes.post("/invoices/:id/pay-link", async (req, res) => {
@@ -142,27 +160,37 @@ async function remember(jid, role, text) {
 // What the assistant picked up about this person. Only ever fills blanks in or
 // updates with something new — a later message must not wipe what we already knew.
 const LEAD_FIELDS = ["name", "business", "city", "sells", "shops", "online_already", "email", "socials", "suppliers", "budget_hint", "intent"];
+// The model sees only the last few messages, so a lead who asked the price yesterday and
+// says "hi" today could be scored cold — and drop out of the owner's digest. A score set in
+// the last 72 hours only ever goes up (hot stays hot). score_at, not updated_at: updated_at
+// moves on every message, which would hold an old score for as long as they keep chatting.
+const RANK = (s) => `array_position(array['cold','warm','hot'], ${s})`;
+const KEEP_SCORE = `(wa_leads.score_at > now() - interval '72 hours'
+                     and ${RANK("wa_leads.score")} > ${RANK("excluded.score")})`;
 async function saveLead(phone, jid, ai) {
   const p = digits(phone);
   if (!p || !ai?.lead) return;
   const vals = LEAD_FIELDS.map((f) => String(ai.lead[f] || "").trim().slice(0, 300) || null);
   const score = ["hot", "warm", "cold"].includes(ai.score) ? ai.score : "cold";
   await query(
-    `insert into wa_leads (phone, jid, ${LEAD_FIELDS.join(", ")}, score, score_reason)
-     values ($1,$2,${LEAD_FIELDS.map((_, i) => `$${i + 3}`).join(",")},$${LEAD_FIELDS.length + 3},$${LEAD_FIELDS.length + 4})
+    `insert into wa_leads (phone, jid, ${LEAD_FIELDS.join(", ")}, score, score_reason, score_at)
+     values ($1,$2,${LEAD_FIELDS.map((_, i) => `$${i + 3}`).join(",")},$${LEAD_FIELDS.length + 3},$${LEAD_FIELDS.length + 4}, now())
      on conflict (phone) do update set
        ${LEAD_FIELDS.map((f) => `${f} = coalesce(excluded.${f}, wa_leads.${f})`).join(", ")},
-       score = excluded.score, score_reason = excluded.score_reason,
+       score = case when ${KEEP_SCORE} then wa_leads.score else excluded.score end,
+       score_reason = case when ${KEEP_SCORE} then wa_leads.score_reason else excluded.score_reason end,
+       score_at = case when ${KEEP_SCORE} then wa_leads.score_at else now() end,
        jid = coalesce(excluded.jid, wa_leads.jid), updated_at = now()`,
     [p, jid || null, ...vals, score, String(ai.score_reason || "").slice(0, 300) || null]);
 }
 
 // Remember a good AI answer so the bot can still reply when Gemini is down.
-// Only general questions are kept — anything tied to one person's account would be
-// wrong for the next person who asks. An answer we already have just gains a new phrasing.
-async function learnFromAi({ question, answer, lang, action }) {
+// Only general questions are kept — anything tied to one person (their account, their
+// numbers, their name) would be wrong for the next person who asks. An answer we already
+// have just gains a new phrasing.
+async function learnFromAi({ question, answer, lang, action, names }) {
   const q = String(question || "").trim();
-  if (!worthLearning({ question: q, answer: String(answer || ""), action })) return;
+  if (!worthLearning({ question: q, answer: String(answer || ""), action, names })) return;
 
   const m = bestMatch(q, await phrases());
   if (m) {                                                 // known question, new wording
@@ -190,37 +218,53 @@ waInternalRoutes.post("/reply", async (req, res) => {
     if (!jid || !text) return res.status(400).json({ error: "jid and text required" });
     await remember(jid, "client", text);
 
-    const [history, faqs, contact] = await Promise.all([
+    const [history, faqs, contact, lead] = await Promise.all([
       // Only today's thread: a conversation from days ago is a different conversation,
       // and dragging its tone (or the old menu bot's) into a fresh chat reads badly.
       query(`select role, text from (
                select id, role, text from wa_messages
                 where jid=$1 and created_at > now() - interval '20 hours'
                 order by id desc limit 9) h order by id`, [jid]),
-      query(`select f.id, f.answer_en, f.answer_hinglish, f.answer_hi,
-                    coalesce(array_agg(p.phrase) filter (where p.id is not null), '{}') as phrases
-               from wa_faqs f left join wa_faq_phrases p on p.faq_id = f.id
-              group by f.id order by f.hits desc limit 60`),
+      // The prompt calls these "the owner's own saved answers": the owner's rows go first and
+      // always fit; answers the bot learned from its own chats are capped at 10 and marked.
+      query(`select * from (
+               select f.id, f.source, f.hits, f.answer_en, f.answer_hinglish, f.answer_hi,
+                      coalesce(array_agg(p.phrase) filter (where p.id is not null), '{}') as phrases,
+                      row_number() over (partition by f.source order by f.hits desc, f.id desc) as n
+                 from wa_faqs f left join wa_faq_phrases p on p.faq_id = f.id
+                group by f.id) x
+              where source = 'owner' or n <= 10
+              order by (source = 'owner') desc, hits desc, id desc limit 60`),
       contactFor(phone),
+      // What we already learned about them, from earlier days too: the history above is only
+      // today's few messages, so without this the model re-asks and re-scores from scratch.
+      query(`select ${LEAD_FIELDS.join(", ")}, score from wa_leads where phone=$1`, [digits(phone)]),
     ]);
+    const LEARNED = "[learned from an earlier chat, NOT the owner's words — the guide wins] ";
+    const savedFaqs = faqs.rows.map((f) => f.source === "owner" ? f : {
+      ...f, ...Object.fromEntries(LANGS.map((l) => [`answer_${l}`, f[`answer_${l}`] && LEARNED + f[`answer_${l}`]])),
+    });
 
     const ai = await converse({
       question: text, name,
       history: history.rows.slice(0, -1),   // the newest row is this same message
-      faqs: faqs.rows, contact,
+      faqs: savedFaqs, contact,
+      lead: lead.rows[0],                     // undefined for someone new
     });
 
     // Gemini answered. An escalation now comes back with an EMPTY reply on purpose (the
     // assistant stays silent instead of saying "let me check"), so test for the object,
     // not the text — otherwise escalations fall into the Gemini-is-down branch below.
     if (ai && (String(ai.reply || "").trim() || ai.escalate)) {
-      const lang = LANGS.includes(ai.lang) ? ai.lang : "hinglish";
+      // ai.partial: the answer was cut off and only the reply was salvaged — its lang,
+      // lead and score are missing, so what we already know about them is kept as is.
+      const lang = LANGS.includes(ai.lang) ? ai.lang : (contact.lang || "hinglish");
       const score = ["hot", "warm", "cold"].includes(ai.score) ? ai.score : null;
-      if (contact.phone) await query(
+      if (contact.phone && !ai.partial && LANGS.includes(ai.lang)) await query(
         `insert into wa_contacts (phone, lang) values ($1,$2)
          on conflict (phone) do update set lang=excluded.lang, updated_at=now()`, [contact.phone, lang]);
 
-      saveLead(phone, jid, ai).catch((e) => console.error("lead", e.message));
+      if (!ai.partial) saveLead(phone, jid, ai).catch((e) => console.error("lead", e.message));
       // The model sometimes answers with "team se confirm karke batata hoon" instead of
       // escalating. That line is never sent: it becomes a silent hand-off to the owner.
       if (!ai.escalate && isStalling(ai.reply)) {
@@ -242,9 +286,13 @@ waInternalRoutes.post("/reply", async (req, res) => {
                     p.catName && `Category: ${p.catName}`,
                     `👉 ${APP_URL}/?q=${encodeURIComponent(p.name || q)}`].filter(Boolean).join("\n"),
         }));
+        // The model wrote its line before the search ran. Nothing found: that "haan ji, yeh
+        // dekhiye" would promise something we don't have, so it's replaced outright.
+        if (!products.length)
+          reply = `${NOT_FOUND_LINE[lang] || NOT_FOUND_LINE.hinglish} 👉 ${APP_URL}/?q=${encodeURIComponent(q)}`;
         // The photos already carry a link each — only add the "whole range" line if we
         // haven't just sent a link, so the chat doesn't turn into link spam.
-        if (!linkedRecently && !reply.includes("://"))
+        else if (!linkedRecently && !reply.includes("://"))
           reply += `\n\n${PORTAL_LINE[lang] || PORTAL_LINE.hinglish} 👉 ${APP_URL}/?q=${encodeURIComponent(q)}`;
       }
       if (ai.action === "pay_link" && contact.invoices?.length) {
@@ -252,14 +300,16 @@ waInternalRoutes.post("/reply", async (req, res) => {
         const r = inv ? await startInvoicePayment(inv).catch(() => ({})) : {};
         reply += `\n${r.payment_url || `${APP_URL}/billing`}`;
       }
-      await remember(jid, "us", reply);
+      // Not written to the chat memory here: the bot posts /sent once it has actually
+      // delivered it — the owner may step in first and the reply is then dropped.
       // Logged so the owner can see in the portal what the assistant said on its own.
       await query(
         `insert into wa_questions (phone, jid, user_id, name, text, lang, status, answer, source, answered_at)
          values ($1,$2,$3,$4,$5,$6,'answered',$7,'ai', now())`,
         [digits(phone), jid, contact.user?.id || null, name || null, text, lang, reply]);
       // Keep it as a saved answer, so this question survives the next Gemini outage.
-      learnFromAi({ question: text, answer: reply, lang, action: ai.action }).catch((e) => console.error("learn", e.message));
+      if (!ai.partial) learnFromAi({ question: text, answer: reply, lang, action: ai.action,
+        names: [name, ai.lead?.name, contact.user?.name] }).catch((e) => console.error("learn", e.message));
       return res.json({ reply, lang, products, score, source: "ai" });
     }
 
@@ -268,7 +318,7 @@ waInternalRoutes.post("/reply", async (req, res) => {
     if (m) {
       const answer = await faqAnswer(m.faq_id, contact.lang);
       // an old saved answer that just stalls is worse than the silent hand-off below
-      if (answer && !isStalling(answer)) { await remember(jid, "us", answer); return res.json({ reply: answer, faq_id: m.faq_id, source: "faq" }); }
+      if (answer && !isStalling(answer)) return res.json({ reply: answer, faq_id: m.faq_id, source: "faq" });   // memory via /sent
     }
     res.json({ reply: null, escalate: true, source: "none" });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -286,24 +336,28 @@ waInternalRoutes.post("/forget", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// What the bot actually sent (owner answers, follow-ups) — keeps the memory honest.
-waInternalRoutes.post("/sent", async (req, res) => {
+// What the bot actually delivered (AI and saved-answer replies, owner answers, follow-ups) —
+// the only way a "us" line enters the memory, so it never holds a line the client didn't get.
+waInternalRoutes.post("/sent", wrap(async (req, res) => {
   await remember(req.body?.jid, "us", req.body?.text);
   res.json({ ok: true });
-});
+}));
 
 waInternalRoutes.post("/questions", async (req, res) => {
   try {
     const { phone, jid, name, text, lang } = req.body || {};
     if (!jid || !text) return res.status(400).json({ error: "jid and text required" });
-    // Don't ask the owner the same thing twice: if an identical question is already
-    // pending a reply (any chat), return that one so the bot points the owner at it
-    // instead of opening a duplicate — which would later become a duplicate FAQ.
+    // Don't ask the owner the same thing twice from the SAME chat: point at the pending
+    // copy and restart its clock, so the 15-minute pick-up can fire again. Never across
+    // chats (the owner's answer only reaches the first asker) and never for a media
+    // placeholder like "[voice note]" — two voice notes share that text, not their content.
     const norm = String(text).toLowerCase().replace(/\s+/g, " ").trim();
-    const dup = (await query(
-      `select id from wa_questions
-        where status='pending' and btrim(regexp_replace(lower(text), '\\s+', ' ', 'g')) = $1
-        order by id desc limit 1`, [norm]
+    const dup = isMediaPlaceholder(norm) ? null : (await query(
+      `update wa_questions set created_at=now()
+        where id = (select id from wa_questions
+                     where jid=$2 and status='pending' and btrim(regexp_replace(lower(text), '\\s+', ' ', 'g')) = $1
+                     order by id desc limit 1)
+        returning id`, [norm, jid]
     )).rows[0];
     if (dup) return res.json({ id: dup.id, duplicate: true });
     const user = await userByPhone(phone);
@@ -316,25 +370,28 @@ waInternalRoutes.post("/questions", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-waInternalRoutes.patch("/questions/:id", async (req, res) => {
+waInternalRoutes.patch("/questions/:id", wrap(async (req, res) => {
   const { owner_msg_id, draft_msg_id } = req.body || {};
   if (draft_msg_id) await query(`update wa_questions set draft_msg_id=$1 where id=$2`, [draft_msg_id, req.params.id]);
   if (owner_msg_id) await query(`update wa_questions set owner_msg_id=$1 where id=$2`, [owner_msg_id, req.params.id]);
   res.json({ ok: true });
-});
+}));
 
 // Owner answered. Body: { id | owner_msg_id } + one of { text } | { faq_id } | { skip } | { text, fix }.
 // text -> Gemini tidies it and writes all three languages -> new FAQ (its phrase =
 // the asker's words). faq_id -> the asker's words become a new phrase of that FAQ.
 // fix -> rewrite the answer of an already-answered question (no message to the client).
+// once -> confirm and send, but never save it as an answer for everyone (a one-person reply).
 waInternalRoutes.post("/answer", async (req, res) => {
   try {
-    const { id, owner_msg_id, text, faq_id, skip, fix, confirm, raw } = req.body || {};
-    // A plain "ok" with nothing quoted means the draft we just showed them.
+    const { id, owner_msg_id, text, faq_id, skip, fix, raw, once } = req.body || {};
+    const confirm = req.body?.confirm || once;
+    // A plain "ok" with nothing quoted means the draft we showed them most recently
+    // (draft_at), not whichever pending question happens to have the highest id.
     const q = (await query(
       id ? `select * from wa_questions where id=$1`
         : owner_msg_id ? `select * from wa_questions where owner_msg_id=$1 or draft_msg_id=$1 order by id desc limit 1`
-        : `select * from wa_questions where status='pending' and draft is not null order by id desc limit 1`,
+        : `select * from wa_questions where status='pending' and draft is not null order by draft_at desc nulls last, id desc limit 1`,
       id || owner_msg_id ? [id || owner_msg_id] : []
     )).rows[0];
     if (!q) return res.status(404).json({ error: "question not found" });
@@ -342,8 +399,16 @@ waInternalRoutes.post("/answer", async (req, res) => {
     if (fix) {
       if (!String(text || "").trim()) return res.status(400).json({ error: "empty correction" });
       const versions = langColumns(text, q.lang);   // sent exactly as the owner typed it
+      // A one-off (a price, a deal, "master copy") corrects this question only — it never
+      // becomes, or rewrites, an answer the bot gives everyone.
+      if (isOneOff({ question: q.text, answer: text }) || (!q.faq_id && isMediaPlaceholder(q.text))) {
+        const answer = String(text).trim();
+        await query(`update wa_questions set answer=$1, source='owner' where id=$2`, [answer, q.id]);
+        return res.json({ question: q, answer, faq_id: null, versions, fixed: true, one_off: true });
+      }
+      // source='owner': correcting a learned answer makes it the owner's words from now on.
       const faq = q.faq_id
-        ? (await query(`update wa_faqs set answer_en=$1, answer_hinglish=$2, answer_hi=$3, updated_at=now() where id=$4 returning *`,
+        ? (await query(`update wa_faqs set answer_en=$1, answer_hinglish=$2, answer_hi=$3, source='owner', updated_at=now() where id=$4 returning *`,
             [versions.answer_en, versions.answer_hinglish, versions.answer_hi, q.faq_id])).rows[0]
         : (await query(`insert into wa_faqs (answer_en, answer_hinglish, answer_hi) values ($1,$2,$3) returning *`,
             [versions.answer_en, versions.answer_hinglish, versions.answer_hi])).rows[0];
@@ -356,42 +421,61 @@ waInternalRoutes.post("/answer", async (req, res) => {
 
     if (q.status !== "pending") return res.status(409).json({ error: `#${q.id} already ${q.status} — use "#${q.id} fix <text>" to correct it` });
 
+    // Every status change below claims the row with "where status='pending'": two "ok"s
+    // landing together must not both send the answer (and both save a FAQ).
+    const claim = async (sql, vals) => !!(await query(sql, vals)).rowCount;
+    const taken = () => res.status(409).json({ error: `#${q.id} was just handled — use "#${q.id} fix <text>" to correct it` });
+
     if (skip) {
-      await query(`update wa_questions set status='skipped', answered_at=now() where id=$1`, [q.id]);
+      if (!await claim(`update wa_questions set status='skipped', answered_at=now() where id=$1 and status='pending'`, [q.id])) return taken();
       return res.json({ question: q, answer: null });
     }
 
-    let faq, versions = null;
+    let faq = null, versions = null, answer;
     if (faq_id) {
       faq = (await query(`select * from wa_faqs where id=$1`, [faq_id])).rows[0];
       if (!faq) return res.status(404).json({ error: `FAQ ${faq_id} not found` });
+      answer = pickAnswer(faq, q.lang);
     } else {
       // Step 1: the owner's note becomes a draft message, shown to them first.
-      // Their note can be the answer OR an instruction ("bol do kal ho jayega").
+      // Their note can be the answer OR an instruction ("bol do kal ho jayega"). A note on
+      // a question that already has a draft is a correction to THAT draft ("thoda short karo").
       if (!confirm) {
         if (!String(text || "").trim()) return res.status(400).json({ error: "empty answer" });
         const history = (await query(
           `select role, text from (select id, role, text from wa_messages where jid=$1 order by id desc limit 6) h order by id`,
           [q.jid])).rows;
-        const draft = raw ? text.trim()
-          : (await draftReply({ note: text, question: q.text, lang: q.lang, history })) || text.trim();
-        await query(`update wa_questions set draft=$1 where id=$2`, [draft, q.id]);
+        const draft = raw ? String(text).trim()
+          : textOf(await draftReply({ note: text, question: q.text, lang: q.lang, history, previousDraft: q.draft || undefined }))
+            || String(text).trim();
+        await query(`update wa_questions set draft=$1, draft_at=now() where id=$2`, [draft, q.id]);
         return res.json({ question: q, draft, drafted: true });
       }
       // Step 2: confirmed — send it.
-      const final = String(text || q.draft || "").trim();
-      if (!final) return res.status(400).json({ error: "nothing to send" });
-      versions = langColumns(final, q.lang);
-      faq = (await query(`insert into wa_faqs (answer_en, answer_hinglish, answer_hi) values ($1,$2,$3) returning *`,
-        [versions.answer_en, versions.answer_hinglish, versions.answer_hi])).rows[0];
+      answer = String(text || q.draft || "").trim();
+      if (!answer) return res.status(400).json({ error: "nothing to send" });
+      versions = langColumns(answer, q.lang);
     }
-    await query(`insert into wa_faq_phrases (faq_id, phrase) values ($1,$2)`, [faq.id, q.text]);
-    const answer = pickAnswer(faq, q.lang);
-    await query(
-      `update wa_questions set status='answered', faq_id=$1, answer=$2, source='owner', answered_at=now() where id=$3`,
-      [faq.id, answer, q.id]);
+    if (!await claim(
+      `update wa_questions set status='answered', answer=$1, source='owner', answered_at=now() where id=$2 and status='pending'`,
+      [answer, q.id])) return taken();
+    // A deal with one person (a price, a discount, "master copy hai") goes to them once
+    // and is never saved — as a saved answer it would be repeated to everyone who asks.
+    // Same for a reply to a bare voice note/photo: "[voice note]" is no question to match on,
+    // and for "once": the owner's own say-so, for what the keyword check can't spot.
+    if (once || isMediaPlaceholder(q.text) || (!faq && isOneOff({ question: q.text, answer })))
+      return res.json({ question: q, answer, faq_id: faq?.id || null, versions, one_off: true });
+    // The row is claimed: from here the client must get the answer. Saving it for next time
+    // is a bonus — a failed write is logged, never a 500 that leaves them unanswered (a retry
+    // would only hit "already answered").
+    try {
+      if (!faq) faq = (await query(`insert into wa_faqs (answer_en, answer_hinglish, answer_hi) values ($1,$2,$3) returning *`,
+        [versions.answer_en, versions.answer_hinglish, versions.answer_hi])).rows[0];
+      await query(`insert into wa_faq_phrases (faq_id, phrase) values ($1,$2)`, [faq.id, q.text]);
+      await query(`update wa_questions set faq_id=$1 where id=$2`, [faq.id, q.id]);
+    } catch (e) { console.error(`[wa] #${q.id} sent but not saved as an answer:`, e.message); }
     dropCache();
-    res.json({ question: q, answer, faq_id: faq.id, versions });
+    res.json({ question: q, answer, faq_id: faq?.id || null, versions });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -416,13 +500,14 @@ waInternalRoutes.post("/chats/event", async (req, res) => {
          on conflict (jid) do update set phone=excluded.phone returning *`,
         [jid, phone, dir === "out" ? "owner" : "client"])).rows[0];
     }
-    if (chat.status === "active") {
-      await query(
-        dir === "in"
+    // The phone is recorded whatever the status: a legacy chat stored under a LID-only id
+    // has no phone, and without it "on <number>" can never find the chat to switch it on.
+    await query(
+      chat.status !== "active" ? `update wa_chats set phone=coalesce(nullif($2,''), phone) where jid=$1`
+        : dir === "in"
           ? `update wa_chats set last_in_at=now(), followups=0, phone=coalesce(nullif($2,''), phone) where jid=$1`
           : `update wa_chats set last_out_at=now(), phone=coalesce(nullif($2,''), phone) where jid=$1`,
-        [chat.jid, phone]);
-    }
+      [chat.jid, phone]);
     res.json({ chat, created });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -441,26 +526,35 @@ waInternalRoutes.post("/chats/legacy", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Owner "on/off <number>" and client opt-out. Body: { jid? | phone? , status?, opted_out? }
+// Owner "on/off <number>" and client opt-out. Body: { jid? | phone?, jids?, status?, opted_out? }
+// jids: the number's own chat ids (phone id + private LID if WhatsApp knows it). A chat
+// stored under its LID can have no phone yet — matched by phone alone, "on" would miss it
+// and create a second row, while the old one keeps the client silenced.
+// -> { updated: existing rows changed, created: true only when a new row had to be made }
 waInternalRoutes.post("/chats/set", async (req, res) => {
   try {
     const { jid, status, opted_out } = req.body || {};
     const last10 = digits(req.body?.phone).slice(-10);
-    const where = jid ? `jid=$1` : `right(phone, 10)=$1`;
-    const key = jid || last10;
-    if (!key) return res.status(400).json({ error: "jid or phone required" });
+    const jids = (Array.isArray(req.body?.jids) ? req.body.jids : []).filter((j) => j && typeof j === "string");
+    // the row the insert below would make — if it already exists (phone ''), it's this chat
+    if (last10.length === 10) jids.push(`91${last10}@s.whatsapp.net`);
+    if (!jid && !last10 && !jids.length) return res.status(400).json({ error: "jid or phone required" });
+    // $1 <> '': an empty phone must not match every LID-only row that has phone ''
+    const where = jid ? `jid=$1` : `(($1 <> '' and right(phone, 10)=$1) or jid = any($2::text[]))`;
     const sets = [];
-    const vals = [key];
+    const vals = jid ? [jid] : [last10, jids];
     if (["active", "off"].includes(status)) { vals.push(status); sets.push(`status=$${vals.length}`, "followups=0"); }
     if (typeof opted_out === "boolean") { vals.push(opted_out); sets.push(`opted_out=$${vals.length}`); }
     if (!sets.length) return res.status(400).json({ error: "nothing to set" });
-    let rows = (await query(`update wa_chats set ${sets.join(", ")} where ${where} returning jid`, vals)).rows;
+    const updated = (await query(`update wa_chats set ${sets.join(", ")} where ${where} returning jid`, vals)).rowCount;
     // "on <number>" for someone the bot has never seen: create it so their next message is answered.
-    if (!rows.length && status === "active" && !jid && last10.length === 10) {
-      rows = (await query(`insert into wa_chats (jid, phone, started_by) values ($1,$2,'owner') returning jid`,
-        [`91${last10}@s.whatsapp.net`, `91${last10}`])).rows;
+    let created = false;
+    if (!updated && status === "active" && !jid && last10.length === 10) {
+      await query(`insert into wa_chats (jid, phone, started_by) values ($1,$2,'owner')`,
+        [`91${last10}@s.whatsapp.net`, `91${last10}`]);
+      created = true;
     }
-    res.json({ updated: rows.length });
+    res.json({ updated, created });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -483,13 +577,13 @@ waInternalRoutes.get("/chats/due", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-waInternalRoutes.post("/chats/followed-up", async (req, res) => {
+waInternalRoutes.post("/chats/followed-up", wrap(async (req, res) => {
   await query(`update wa_chats set followups=followups+1, last_out_at=now() where jid=$1`, [req.body?.jid || ""]);
   res.json({ ok: true });
-});
+}));
 
 // New/updated leads for the owner's daily digest.
-waInternalRoutes.get("/leads/new", async (req, res) => {
+waInternalRoutes.get("/leads/new", wrap(async (req, res) => {
   const hours = Math.max(1, Number(req.query.hours) || 24);
   const rows = (await query(
     `select phone, name, business, city, sells, shops, score, score_reason
@@ -497,11 +591,11 @@ waInternalRoutes.get("/leads/new", async (req, res) => {
       order by case score when 'hot' then 1 when 'warm' then 2 else 3 end, updated_at desc
       limit 25`, [hours])).rows;
   res.json({ leads: rows });
-});
+}));
 
 // Used only when Gemini is down at the moment a chat needs picking back up. Each moves
-// the talk to their shop instead of mentioning the wait; the question id picks one, so
-// the same person doesn't get the same line twice in a row.
+// the talk to their shop instead of mentioning the wait; the first one this chat hasn't
+// already been sent is used, so the same person doesn't get the same line twice.
 const REENGAGE_FALLBACK = {
   hinglish: [
     "Waise aapki shop kahan hai, aur zyada customer kahan se aate hain — aas-paas se ya bahar se bhi?",
@@ -523,6 +617,8 @@ const REENGAGE_FALLBACK = {
 // Chats left hanging: a question went to the owner `mins` ago, they haven't answered,
 // and we haven't said anything since. Returns a fresh line that restarts the talk from
 // another angle, so the client isn't left staring at their own message.
+// Nothing is written to the chat memory here: the bot posts /sent once it has actually
+// delivered the line — a line that never went out must not become "already said".
 waInternalRoutes.get("/chats/reengage", async (req, res) => {
   try {
     const mins = Math.max(5, Number(req.query.mins) || 15);
@@ -533,41 +629,49 @@ waInternalRoutes.get("/chats/reengage", async (req, res) => {
           and q.created_at < now() - make_interval(mins => $1)
           and q.created_at > now() - interval '6 hours'
           and (c.last_out_at is null or c.last_out_at < q.created_at)
-        order by q.jid, q.id desc limit 10`, [mins])).rows;
+          -- a line was already made for this question: if the bot never delivered it, try
+          -- again after 30 minutes (not every tick), or at once if the client asked again
+          and (q.reengaged_at is null or q.reengaged_at < q.created_at or q.reengaged_at < now() - interval '30 minutes')
+        order by q.jid, q.id desc limit 10`, [mins])).rows.slice(0, 5);
+    if (rows.length) await query(`update wa_questions set reengaged_at=now() where id = any($1)`, [rows.map((q) => q.id)]);
 
-    // In parallel: the AI pool spreads these across keys, and the bot's request to us
-    // times out at 90s — one-by-one with Google's 40s waits would blow past that.
-    const out = (await Promise.all(rows.slice(0, 5).map(async (q) => {
+    // In parallel: the AI pool spreads these across keys, and ask() gives up at its own
+    // deadline, so this answers well inside the bot's timeout.
+    const out = (await Promise.all(rows.map(async (q) => {
       const history = (await query(
         `select role, text from (select id, role, text from wa_messages where jid=$1 order by id desc limit 8) h order by id`,
         [q.jid])).rows;
-      const ai = await reengage({ history, contact: await contactFor(q.phone), lang: q.lang, pendingQuestion: q.text });
-      const text = (ai && !isStalling(ai) ? ai : null)                                  // never a "let me check" line
-        || REENGAGE_FALLBACK[q.lang]?.[q.id % 3] || REENGAGE_FALLBACK.hinglish[q.id % 3];   // Gemini down too
-      await remember(q.jid, "us", text);
-      return { jid: q.jid, text };
-    }))).filter(Boolean);
+      const said = textOf(await reengage({ history, contact: await contactFor(q.phone), lang: q.lang, pendingQuestion: q.text }));
+      // Gemini down too: the first fallback line this chat hasn't already been sent.
+      const lines = REENGAGE_FALLBACK[q.lang] || REENGAGE_FALLBACK.hinglish;
+      const fallback = lines.find((l) => !history.some((h) => h.text === l)) || lines[q.id % lines.length];
+      return { jid: q.jid, text: (said && !isStalling(said) ? said : null) || fallback };   // never a "let me check" line
+    }).map((p) => p.catch((e) => { console.error("[wa] reengage", e.message); return null; })))).filter(Boolean);
     res.json({ chats: out });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// End-of-day numbers for the owner.
+// End-of-day numbers for the owner. "Today" is the IST calendar day (the report goes out
+// at 20:00 IST), not a rolling 24 hours that drags in last night; ?hours= still works.
 waInternalRoutes.get("/report/today", async (req, res) => {
   try {
-    const since = `now() - interval '${Math.max(1, Number(req.query.hours) || 24)} hours'`;
+    const since = req.query.hours ? `now() - interval '${Math.max(1, Number(req.query.hours) || 24)} hours'`
+      : `(date_trunc('day', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata')`;
     const one = async (sql, p = []) => (await query(sql, p)).rows;
     const [msgs] = await one(`select
         count(*) filter (where role='client')::int as incoming,
         count(*) filter (where role='us')::int as sent,
         count(distinct jid)::int as chats
       from wa_messages where created_at > ${since}`);
+    // waiting_on_you counts every pending question, like the "still waiting" list below it.
     const [qs] = await one(`select
         count(*) filter (where source='ai')::int as answered_by_ai,
         count(*) filter (where source='owner' and status='answered')::int as answered_by_you,
-        count(*) filter (where status='pending')::int as waiting_on_you
+        (select count(*) from wa_questions where status='pending')::int as waiting_on_you
       from wa_questions where created_at > ${since}`);
+    // legacy rows are old chats found at link time, not new conversations
     const [chats] = await one(`select
-        count(*) filter (where started_at > ${since})::int as new_chats,
+        count(*) filter (where started_at > ${since} and status <> 'legacy')::int as new_chats,
         count(*) filter (where started_at > ${since} and started_by='owner')::int as you_started,
         count(*) filter (where opted_out)::int as opted_out_total
       from wa_chats`);
@@ -583,14 +687,14 @@ waInternalRoutes.get("/report/today", async (req, res) => {
 });
 
 // Escalations the owner hasn't answered for `hours` — for the daily reminder.
-waInternalRoutes.get("/questions/stale", async (req, res) => {
+waInternalRoutes.get("/questions/stale", wrap(async (req, res) => {
   const hours = Math.max(1, Number(req.query.hours) || 24);
   const rows = (await query(
     `select id, name, phone, text, created_at from wa_questions
       where status='pending' and created_at < now() - make_interval(hours => $1)
       order by created_at limit 20`, [hours])).rows;
   res.json({ questions: rows });
-});
+}));
 
 waInternalRoutes.post("/bot-status", (req, res) => {
   botStatus = { state: String(req.body?.state || "unknown"), qr: req.body?.qr || null, at: new Date().toISOString() };
@@ -604,9 +708,9 @@ waAdminRoutes.use(requireAuth, requireAdmin);
 waAdminRoutes.get("/status", (req, res) => res.json({ ...botStatus, ai: aiUsage() }));
 
 // Extra notes added on top of portal/kartify-guide.md (the assistant's main knowledge).
-waAdminRoutes.get("/business", async (req, res) => {
+waAdminRoutes.get("/business", wrap(async (req, res) => {
   res.json({ notes: await extraNotes() });
-});
+}));
 
 waAdminRoutes.put("/business", async (req, res) => {
   try {
@@ -630,8 +734,9 @@ async function saveFaq(id, body) {
   const vals = LANGS.map((l) => String(body[`answer_${l}`] || "").trim());
   if (!vals.some(Boolean)) throw Object.assign(new Error("Write the answer in at least one language"), { status: 400 });
   if (!phrasesIn.length) throw Object.assign(new Error("Add at least one question phrase"), { status: 400 });
+  // An edit in the admin screen is the owner's wording, even on a row the bot learned.
   const faq = id
-    ? (await query(`update wa_faqs set answer_en=$1, answer_hinglish=$2, answer_hi=$3, updated_at=now() where id=$4 returning *`, [...vals, id])).rows[0]
+    ? (await query(`update wa_faqs set answer_en=$1, answer_hinglish=$2, answer_hi=$3, source='owner', updated_at=now() where id=$4 returning *`, [...vals, id])).rows[0]
     : (await query(`insert into wa_faqs (answer_en, answer_hinglish, answer_hi) values ($1,$2,$3) returning *`, vals)).rows[0];
   if (!faq) throw Object.assign(new Error("FAQ not found"), { status: 404 });
   await query(`delete from wa_faq_phrases where faq_id=$1`, [faq.id]);
@@ -650,31 +755,31 @@ waAdminRoutes.put("/faqs/:id", async (req, res) => {
   catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
-waAdminRoutes.delete("/faqs/:id", async (req, res) => {
+waAdminRoutes.delete("/faqs/:id", wrap(async (req, res) => {
   await query(`delete from wa_faqs where id=$1`, [req.params.id]);
   dropCache();
   res.json({ ok: true });
-});
+}));
 
-waAdminRoutes.get("/questions", async (req, res) => {
+waAdminRoutes.get("/questions", wrap(async (req, res) => {
   const status = ["pending", "answered", "skipped"].includes(req.query.status) ? req.query.status : "pending";
   const rows = (await query(
     `select q.*, u.email from wa_questions q left join users u on u.id = q.user_id
       where q.status=$1 order by q.created_at desc limit 200`, [status])).rows;
   res.json({ questions: rows });
-});
+}));
 
-waAdminRoutes.get("/leads", async (req, res) => {
+waAdminRoutes.get("/leads", wrap(async (req, res) => {
   const score = ["hot", "warm", "cold"].includes(req.query.score) ? req.query.score : null;
   const rows = (await query(
     `select * from wa_leads ${score ? "where score=$1" : ""}
       order by case score when 'hot' then 1 when 'warm' then 2 else 3 end, updated_at desc limit 300`,
     score ? [score] : [])).rows;
   res.json({ leads: rows });
-});
+}));
 
 // "Test the matcher" box in the admin screen.
-waAdminRoutes.post("/test-match", async (req, res) => {
+waAdminRoutes.post("/test-match", wrap(async (req, res) => {
   const m = bestMatch(req.body?.text, await phrases());
   res.json(m || { faq_id: null });
-});
+}));

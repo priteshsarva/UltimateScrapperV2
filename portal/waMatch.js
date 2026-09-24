@@ -88,13 +88,37 @@ export function bestMatch(text, phrases, threshold = MATCH_THRESHOLD) {
 // person's account (their invoice, their order, their expiry) would be wrong for the
 // next person who asks, and product/payment replies carry one-off links.
 const PERSONAL = /₹|\bINV-|\bORD-|expir|invoice|\border\b/i;
-export function worthLearning({ question = "", answer = "", action = "" } = {}) {
+// Sales maths done on THIS person's numbers ("roz 40 customer × Rs 800 = 32,000, 9 lakh
+// mahine ka") is about them — replayed to the next person it's numbers they never gave.
+const SALES_MATHS = /\brs\b|rupa?y|rupee|rupiy|रुपय|रुपए|रुपये|\blakh|\blac\b|लाख|hazaa?r|हज़ार|हजार|\broz|रोज़|रोज|×|\d\s*[x*]\s*\d|\d[\d,]{2,}/i;
+const words = (s) => String(s || "").toLowerCase().split(/[^\p{L}\p{M}]+/u).filter(Boolean);
+const nums = (s) => String(s || "").match(/\p{Nd}+/gu) || [];
+// names: the client's WhatsApp / lead / account name — a reply that uses it is theirs alone.
+export function worthLearning({ question = "", answer = "", action = "", names = [] } = {}) {
   if (action) return false;                          // show_products / pay_link replies
   if (isStalling(answer)) return false;              // never learn "let me check and get back"
   if (question.trim().length < 12 || answer.trim().length < 20) return false;
-  if (PERSONAL.test(answer)) return false;
+  if (PERSONAL.test(answer) || SALES_MATHS.test(answer)) return false;
+  // Their own count echoed back ("daily 40 customer" -> "40 customer daily achha hai") is
+  // about them: replayed to the next shop it's a number they never gave.
+  if (nums(answer).some((n) => nums(question).includes(n))) return false;
+  if (isOneOff({ question, answer })) return false;  // money, deals, originality: never a stock answer
+  const said = new Set(words(answer));
+  if (names.flatMap(words).some((w) => w.length >= 3 && !STOP.has(w) && said.has(w))) return false;
   return normalize(question).length >= 2;            // not a greeting or "ok thanks"
 }
+
+// An owner answer that is a deal with ONE person — a price, a discount, "master copy hai"
+// told to one vendor. It goes to that person once and is never kept as a saved answer:
+// saved, the bot would repeat someone else's deal (or a vendor-only line) to everyone.
+const ONE_OFF = new RegExp([
+  "₹", "%", "\\brs\\b", "rupa?y", "rupee", "rupiy", "रुपय", "रुपए", "रुपये", "\\d[\\d,]{2,}", "\\blakh", "\\blac\\b", "hazaa?r", "हज़ार", "हजार", "लाख",
+  "dis?count", "\\bdisc\\b", "\\boff(er)?\\b", "\\bdeal", "negotiat", "bargain", "\\bkam\\s?(kar|kr|ho|de)", "(last|best|final) price", "छूट", "डिस्काउंट", "कम (कर|हो)",
+  "price", "\\brate\\b", "\\bcost", "charge", "\\bfees?\\b", "margin", "commission", "refund", "\\bpaise?\\b", "\\bpaisa", "payment", "\\bpay\\b",
+  "ori?gi?n?al", "genuine", "authentic", "\\basli", "\\basal\\b", "nakli", "\\bfake", "duplicate", "replica", "\\bcopy\\b", "\\b7a\\b", "\\baaa\\b",
+  "ओरिजिनल", "असली", "नकली", "कॉपी", "मास्टर",
+].join("|"), "i");
+export const isOneOff = ({ question = "", answer = "" } = {}) => ONE_OFF.test(`${question}\n${answer}`);
 
 // A reply that stalls instead of answering: "team se confirm karke batata hoon",
 // "let me check and get back to you". The owner never wants these sent — the model is
@@ -127,6 +151,31 @@ if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   assert.equal(W("iska price", "Aapka invoice ₹4,000 ka hai."), false);                                             // personal
   assert.equal(W("ok thanks bhai", "Theek hai ji, koi baat nahi. Kabhi bhi poochh lijiye."), false);                 // no content
   assert.equal(W("nike ke shoes dikhao", "Haan ji, yeh dekhiye kuch options.", "show_products"), false);             // one-off
+  // sales maths on one client's numbers (no ₹ sign) is theirs, not a general answer
+  for (const a of ["Ramesh ji, 40 customer roz matlab mahine ke 1200 — Rs 800 average bill hai kya?",
+                   "Agar 20 order extra aaye toh 2 lakh ka business ho jayega, socho zara.",
+                   "25 × 800 matlab din ka bada amount hai, yeh sirf dukaan wale log hain.",
+                   "रोज़ 30 ग्राहक और 500 रुपये का बिल, यह तो अच्छा काम है जी।"])
+    assert.equal(W("mere shop pe roz 40 customer aate hain", a), false, a);
+  // the client's own small counts echoed back, with none of the money words above
+  assert.equal(W("mere shop pe daily 40 customer aate hain", "40 customer daily achha footfall hai ji, unme se kitne online bhi poochte hain?"), false);
+  assert.equal(W("My shop gets around 40 customers daily", "40 customers daily is good footfall, how many of them also ask about buying online?"), false);
+  // a number only in the question is fine as long as the answer doesn't repeat it
+  assert.equal(W("mere 2 shop hain, dono ke liye ek store chalega?", "Haan ji, ek hi store me dono shop ke products dikha sakte hain, koi dikkat nahi."), true);
+  const withName = { question: "delivery kitne din me hoti hai", answer: "Suresh ji, delivery 1 se 3 din me ho jati hai." };
+  assert.equal(worthLearning({ ...withName, names: ["Suresh Kumar"] }), false);                                     // their name
+  assert.equal(worthLearning({ ...withName, names: ["Ramesh"] }), true);
+  assert.equal(W("bhai discount milega kya", "Nahi ji, abhi koi discount nahi chal raha hai."), false);            // money
+  // owner answers that are one person's deal are sent once, never saved for everyone
+  const O = (q, a) => isOneOff({ question: q, answer: a });
+  assert.equal(O("discount milega?", "Aapke liye kar denge ji"), true);
+  assert.equal(O("thoda kam karo bhai", "3500 kar dunga, final"), true);
+  assert.equal(O("original hai?", "Master copy hai ji, quality top hai"), true);
+  assert.equal(O("ye असली है?", "जी, मास्टर कॉपी है"), true);
+  assert.equal(O("kitne ka padega", "Standard plan Rs 4000 mahina"), true);
+  assert.equal(O("delivery kitne din me hoti hai", "1 se 3 din me ho jati hai ji, poore India me"), false);
+  assert.equal(O("plan change kar sakte hain?", "Haan ji, bas humein bata dijiye, mahine ke beech me bhi ho jata hai"), false);
+  assert.equal(O("store kab live hoga", "Submit karte hi 24 ghante me live ho jata hai"), false);
   // stalling lines are caught...
   for (const s of ["Main team se confirm karke abhi batata hoon.", "Team se baat karke bata hu", "ek min, check karke batata hoon ji",
                    "Let me check with the team and get back to you.", "मैं टीम से पूछकर अभी बताता हूँ।", "poochh ke batata hu"])

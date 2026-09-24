@@ -110,3 +110,16 @@ create index if not exists idx_wa_leads_score on wa_leads(score, updated_at desc
 -- conversation the assistant handled well). Learned ones are the offline safety net:
 -- when Gemini is down, the keyword matcher answers from these.
 alter table wa_faqs add column if not exists source text not null default 'owner';
+
+-- draft_at: when the owner was last shown a draft — a bare "ok" confirms the most
+-- recently shown one, not whichever pending question has the highest id.
+-- reengaged_at: when a pick-up line was last made for this question, so an undelivered
+-- line isn't regenerated (another AI call) on every 5-minute tick.
+alter table wa_questions add column if not exists draft_at     timestamptz;
+alter table wa_questions add column if not exists reengaged_at timestamptz;
+
+-- score_at: when the lead's score was last set. A score set in the last 72 hours is never
+-- lowered (the model only sees today's few messages). updated_at moves on every message,
+-- so it can't be used for this. Existing rows start from their last update.
+alter table wa_leads add column if not exists score_at timestamptz;
+update wa_leads set score_at = updated_at where score_at is null;
