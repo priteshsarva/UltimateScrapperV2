@@ -88,20 +88,35 @@ function serialize(fn) {
 // One Gemini call -> parsed JSON, or null on any problem (never throws).
 // Each attempt uses the next key AND the next model, so a busy model or a spent
 // key is stepped over instead of retried into the ground.
+const MAX_TRIES = Number(process.env.WA_AI_TRIES || 4);
 const ask = (prompt) => serialize(async () => {
-  for (let attempt = 0; attempt < MODELS.length + 1; attempt++) {
-    const out = await askNow(prompt, MODELS[attempt % MODELS.length]);
-    if (out) return out;
-    await new Promise((s) => setTimeout(s, 400));
+  let tries = 0;
+  // model OUTER, key INNER: keys and models must not rotate in lockstep, or a bad key
+  // and a busy model can keep cancelling each other out and never pair up.
+  for (const model of MODELS) {
+    for (const key of keys()) {
+      if (tries++ >= MAX_TRIES) return null;
+      const out = await askNow(prompt, model, key);
+      if (out) return out;
+      await new Promise((s) => setTimeout(s, 300));
+    }
   }
   return null;
 });
 
 // One or many keys: GEMINI_API_KEYS=key1,key2,key3 (GEMINI_API_KEY still works).
-// Each key has its own free quota, so a rate-limited call retries on the next key.
-const keys = () => (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "")
-  .split(",").map((k) => k.trim()).filter(Boolean);
-let keyTurn = 0;
+// Each Google PROJECT has its own free quota, so keys from different projects add
+// quota (they do NOT help with 503 "high demand", which is Google being busy).
+// A key that Google rejects outright (401/403) is dropped until the next restart,
+// rather than wasting an attempt on every single message.
+const dead = new Set();
+const keys = () => {
+  const all = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "")
+    .split(",").map((k) => k.trim()).filter(Boolean);
+  const live = all.filter((k) => !dead.has(k));
+  return live.length ? live : all;        // all dead? try them anyway rather than give up
+};
+let keyTurn = 0;   // start offset, so the load spreads across keys between messages
 
 // Circuit breaker: when Gemini is overloaded (503) or timing out, stop calling it for a
 // cooldown instead of hammering it on every message. Hammering just spams the log, burns
@@ -114,10 +129,8 @@ function noteFail() {
   if (++fails >= FAIL_TRIP) { cooldownUntil = Date.now() + COOLDOWN_MS; fails = 0; console.error(`[wa-ai] pausing Gemini ${Math.round(COOLDOWN_MS / 1000)}s after repeated errors`); }
 }
 
-async function askNow(prompt, model) {
+async function askNow(prompt, model, key) {
   if (Date.now() < cooldownUntil) return null;   // breaker open: skip Gemini, use fallback
-  const pool = keys();
-  const key = pool[keyTurn++ % pool.length];
   if (!key || !spend()) return null;
   // Gemini 3 models "think" before answering: that burns output tokens (the answer can
   // come back empty at MAX_TOKENS) and costs seconds, so thinking is switched off there.
@@ -132,9 +145,10 @@ async function askNow(prompt, model) {
     });
     const j = await r.json();
     if (!r.ok) {
-      console.error(`[wa-ai] ${model} ${r.status}`, (j?.error?.message || "").slice(0, 120));
-      noteFail();
-      return null;   // the caller moves on to the next model/key
+      console.error(`[wa-ai] ${model} ${r.status} key…${key.slice(-6)}`, (j?.error?.message || "").slice(0, 100));
+      if (r.status === 401 || r.status === 403) { dead.add(key); console.error(`[wa-ai] dropping bad key …${key.slice(-6)}`); }
+      else noteFail();          // a rejected key is our config problem, not Google being down
+      return null;              // the caller moves on to the next model/key
     }
     const text = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
     if (!text) return null;
