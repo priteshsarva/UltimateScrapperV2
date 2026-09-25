@@ -123,3 +123,27 @@ alter table wa_questions add column if not exists reengaged_at timestamptz;
 -- so it can't be used for this. Existing rows start from their last update.
 alter table wa_leads add column if not exists score_at timestamptz;
 update wa_leads set score_at = updated_at where score_at is null;
+
+-- What the assistant collects to build someone's free demo store, plus where the
+-- conversation has reached. stage is the funnel; won/lost are set by the owner from
+-- WhatsApp ("won 98xxxxxxxx" / "lost 98xxxxxxxx") so conversions can be counted.
+alter table wa_leads add column if not exists store_name          text;
+alter table wa_leads add column if not exists supplier_links      text;
+alter table wa_leads add column if not exists whatsapp_for_orders text;
+alter table wa_leads add column if not exists own_domain          text;
+alter table wa_leads add column if not exists upi_id              text;
+alter table wa_leads add column if not exists plan_interest       text;
+alter table wa_leads add column if not exists stage               text not null default 'new';
+alter table wa_leads add column if not exists outcome             text;   -- won | lost | null
+alter table wa_leads add column if not exists outcome_at          timestamptz;
+create index if not exists idx_wa_leads_stage on wa_leads(stage, updated_at desc);
+
+-- The free 7-day demo storefront built for a prospect from WhatsApp (portal/waDemo.js).
+-- The store itself is a normal hosted enrollment with plan_id NULL and expiry_date NULL,
+-- so neither the billing tick nor hostedExpiryTick touches it; expireDemos() pauses it
+-- after demo_expires_at unless they verified their mobile and bought a plan.
+alter table wa_leads add column if not exists demo_enrollment_id uuid references enrollments(id) on delete set null;
+alter table wa_leads add column if not exists demo_slug          text;
+alter table wa_leads add column if not exists demo_expires_at    timestamptz;
+alter table wa_leads add column if not exists demo_user_id       uuid references users(id) on delete set null;
+create index if not exists idx_wa_leads_demo on wa_leads(demo_expires_at) where demo_enrollment_id is not null;

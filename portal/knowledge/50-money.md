@@ -1,10 +1,18 @@
 # Money — plans, billing, shipping cost, the owner's margin
 
-## Our plans
-- They can **start free**. **Standard is ₹4,000/month.** Shoppers pay by UPI inside the owner's store,
-  or confirm on WhatsApp.
-- What Free includes, whether a payment gateway comes with a plan, and per-plan features are being
-  finalised — don't state them; hand exact plan questions to the owner.
+## Our plans — give the real number the moment they ask
+| Plan | Price | What they get |
+|---|---|---|
+| Free | ₹0 | Unlimited search & browsing · 50 product views · request new source sites · **no store** |
+| Search the product | **₹99/month** | The above + **unlimited product views** · still **no store** |
+| Standard | **₹2,499/month** | The above + **their own store/website** + **customisable layouts** |
+| Pro | **₹3,999/month** | The above + **custom domain** + **their own payment gateway** |
+
+- "I want my own store" → **Standard ₹2,499**. "I want my own domain / my own gateway" → **Pro ₹3,999**.
+- ₹99 is catalogue browsing only — if someone quotes "₹99" thinking it includes a store, correct it
+  kindly and tell them a store starts at ₹2,499.
+- **Fresh store layouts every week**, included — they can restyle their store whenever they like.
+- Shoppers pay by UPI inside the owner's store, or confirm on WhatsApp.
 - Monthly. An invoice appears in the portal before expiry; paid by UPI or the payment link.
 - **Grace period: 7 days** after expiry. If it stays unpaid after that, the store shuts down.
 - **No pausing** for a month. **No refund** on a month already paid.

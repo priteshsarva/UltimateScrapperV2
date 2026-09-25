@@ -11,6 +11,7 @@ import { bestMatch, worthLearning, isStalling, isOneOff } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
 import { converse, draftReply, reengage, extraNotes, aiUsage } from "./waGemini.js";
 import { searchCatalogue } from "./catalogueSearch.js";
+import { createDemoStore, expireDemos, liveDemos, DEMO_DAYS } from "./waDemo.js";
 import { saveSettings } from "./settings.js";
 
 const APP_URL = process.env.APP_URL || "http://localhost:5174";
@@ -159,7 +160,8 @@ async function remember(jid, role, text) {
 
 // What the assistant picked up about this person. Only ever fills blanks in or
 // updates with something new — a later message must not wipe what we already knew.
-const LEAD_FIELDS = ["name", "business", "city", "sells", "shops", "online_already", "email", "socials", "suppliers", "budget_hint", "intent"];
+const LEAD_FIELDS = ["name", "business", "city", "sells", "shops", "online_already", "email", "socials", "suppliers", "budget_hint", "intent",
+  "store_name", "supplier_links", "whatsapp_for_orders", "own_domain", "upi_id", "plan_interest"];
 // The model sees only the last few messages, so a lead who asked the price yesterday and
 // says "hi" today could be scored cold — and drop out of the owner's digest. A score set in
 // the last 72 hours only ever goes up (hot stays hot). score_at, not updated_at: updated_at
@@ -172,16 +174,24 @@ async function saveLead(phone, jid, ai) {
   if (!p || !ai?.lead) return;
   const vals = LEAD_FIELDS.map((f) => String(ai.lead[f] || "").trim().slice(0, 300) || null);
   const score = ["hot", "warm", "cold"].includes(ai.score) ? ai.score : "cold";
+  const STAGES = ["new", "talking", "demo_offered", "demo_yes", "details", "ready", "not_interested"];
+  const stage = STAGES.includes(ai.stage) ? ai.stage : null;
+  // The funnel only moves forward (except a clear "not interested"), so one vague message
+  // can't drag someone who already gave their details back to "talking".
+  const RANK = `array_position($${LEAD_FIELDS.length + 5}::text[], excluded.stage) >= array_position($${LEAD_FIELDS.length + 5}::text[], wa_leads.stage)`;
   await query(
-    `insert into wa_leads (phone, jid, ${LEAD_FIELDS.join(", ")}, score, score_reason, score_at)
-     values ($1,$2,${LEAD_FIELDS.map((_, i) => `$${i + 3}`).join(",")},$${LEAD_FIELDS.length + 3},$${LEAD_FIELDS.length + 4}, now())
+    `insert into wa_leads (phone, jid, ${LEAD_FIELDS.join(", ")}, score, score_reason, score_at, stage)
+     values ($1,$2,${LEAD_FIELDS.map((_, i) => `$${i + 3}`).join(",")},$${LEAD_FIELDS.length + 3},$${LEAD_FIELDS.length + 4}, now(), coalesce($${LEAD_FIELDS.length + 6},'new'))
      on conflict (phone) do update set
        ${LEAD_FIELDS.map((f) => `${f} = coalesce(excluded.${f}, wa_leads.${f})`).join(", ")},
        score = case when ${KEEP_SCORE} then wa_leads.score else excluded.score end,
        score_reason = case when ${KEEP_SCORE} then wa_leads.score_reason else excluded.score_reason end,
        score_at = case when ${KEEP_SCORE} then wa_leads.score_at else now() end,
+       stage = case when excluded.stage is null then wa_leads.stage
+                    when excluded.stage = 'not_interested' or ${RANK} then excluded.stage
+                    else wa_leads.stage end,
        jid = coalesce(excluded.jid, wa_leads.jid), updated_at = now()`,
-    [p, jid || null, ...vals, score, String(ai.score_reason || "").slice(0, 300) || null]);
+    [p, jid || null, ...vals, score, String(ai.score_reason || "").slice(0, 300) || null, STAGES, stage]);
 }
 
 // Remember a good AI answer so the bot can still reply when Gemini is down.
@@ -294,6 +304,16 @@ waInternalRoutes.post("/reply", async (req, res) => {
         // haven't just sent a link, so the chat doesn't turn into link spam.
         else if (!linkedRecently && !reply.includes("://"))
           reply += `\n\n${PORTAL_LINE[lang] || PORTAL_LINE.hinglish} 👉 ${APP_URL}/?q=${encodeURIComponent(q)}`;
+      }
+      // They said yes and we have enough to build it: make the real store now and put the
+      // link in this same message. A demo promised is worth nothing; a demo they can open is.
+      if (ai.action === "create_demo") {
+        const d = await createDemoStore({
+          phone, name: ai.lead?.name || name, store_name: ai.lead?.store_name,
+          sells: ai.lead?.sells, whatsapp: ai.lead?.whatsapp_for_orders, city: ai.lead?.city,
+        }).catch((e) => { console.error("[wa-demo]", e.message); return null; });
+        if (d) reply += `\n${d.url}`;
+        else reply += `\n${APP_URL}`;   // couldn't build it — never leave them with nothing
       }
       if (ai.action === "pay_link" && contact.invoices?.length) {
         const inv = (await query(`select * from invoices where id=$1`, [contact.invoices[0].id])).rows[0];
@@ -582,6 +602,27 @@ waInternalRoutes.post("/chats/followed-up", wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// The owner marks a lead won or lost from WhatsApp ("won 98xxxxxxxx" / "lost 98xxxxxxxx"),
+// so conversions can be counted against the chats that produced them.
+waInternalRoutes.post("/leads/outcome", wrap(async (req, res) => {
+  const last10 = digits(req.body?.phone).slice(-10);
+  const outcome = ["won", "lost"].includes(req.body?.outcome) ? req.body.outcome : null;
+  if (!last10 || !outcome) return res.status(400).json({ error: "phone and outcome (won|lost) required" });
+  const r = await query(
+    `update wa_leads set outcome=$2, outcome_at=now(), updated_at=now() where right(phone,10)=$1
+      returning phone, name, business, store_name, stage`, [last10, outcome]);
+  res.json({ updated: r.rowCount, lead: r.rows[0] || null });
+}));
+
+// Build a demo store by hand ("demo 98xxxxxxxx Shop Name" from the owner), and the
+// housekeeping the bot's tick calls: pause the ones past their 7 days, list the live ones.
+waInternalRoutes.post("/demo/create", wrap(async (req, res) => {
+  const d = await createDemoStore(req.body || {});
+  res.json({ ...d, days: DEMO_DAYS });
+}));
+waInternalRoutes.post("/demo/sweep", wrap(async (req, res) => res.json({ paused: await expireDemos() })));
+waInternalRoutes.get("/demo/live", wrap(async (req, res) => res.json({ demos: await liveDemos() })));
+
 // New/updated leads for the owner's daily digest.
 waInternalRoutes.get("/leads/new", wrap(async (req, res) => {
   const hours = Math.max(1, Number(req.query.hours) || 24);
@@ -676,13 +717,32 @@ waInternalRoutes.get("/report/today", async (req, res) => {
         count(*) filter (where opted_out)::int as opted_out_total
       from wa_chats`);
     const leads = await one(`select score, count(*)::int as n from wa_leads where updated_at > ${since} group by score`);
-    const hot = await one(
-      `select phone, name, business, city, sells, score, score_reason from wa_leads
-        where updated_at > ${since} and score in ('hot','warm')
-        order by case score when 'hot' then 1 else 2 end, updated_at desc limit 10`);
+    // Every chat we talked in today, with what we learned and how far it got — the owner
+    // wants to read the day rather than guess from counts.
+    const perChat = await one(
+      `select l.phone, l.name, l.business, l.city, l.sells, l.shops, l.online_already, l.suppliers,
+              l.store_name, l.supplier_links, l.whatsapp_for_orders, l.own_domain, l.upi_id,
+              l.plan_interest, l.intent, l.stage, l.score, l.score_reason, l.outcome,
+              (select count(*) from wa_messages m where m.jid = l.jid and m.created_at > ${since})::int as msgs,
+              (select text from wa_messages m where m.jid = l.jid and m.role='client'
+                order by m.id desc limit 1) as last_from_them
+         from wa_leads l
+        where l.updated_at > ${since}
+        order by case l.score when 'hot' then 1 when 'warm' then 2 else 3 end,
+                 array_position(array['ready','details','demo_yes','demo_offered','talking','new','not_interested']::text[], l.stage),
+                 l.updated_at desc
+        limit 25`);
+    const [funnel] = await one(`select
+        count(*) filter (where stage in ('demo_offered','demo_yes','details','ready'))::int as demo_offered,
+        count(*) filter (where stage in ('demo_yes','details','ready'))::int as demo_yes,
+        count(*) filter (where stage = 'ready')::int as ready_to_build,
+        count(*) filter (where outcome='won')::int as won_total,
+        count(*) filter (where outcome='won' and outcome_at > ${since})::int as won_today,
+        count(*) filter (where outcome='lost' and outcome_at > ${since})::int as lost_today
+      from wa_leads`);
     const pending = await one(
       `select id, name, phone, text from wa_questions where status='pending' order by id desc limit 10`);
-    res.json({ msgs, qs, chats, leads, hot, pending });
+    res.json({ msgs, qs, chats, leads, funnel, perChat, pending });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
