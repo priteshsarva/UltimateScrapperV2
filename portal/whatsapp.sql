@@ -147,3 +147,19 @@ alter table wa_leads add column if not exists demo_slug          text;
 alter table wa_leads add column if not exists demo_expires_at    timestamptz;
 alter table wa_leads add column if not exists demo_user_id       uuid references users(id) on delete set null;
 create index if not exists idx_wa_leads_demo on wa_leads(demo_expires_at) where demo_enrollment_id is not null;
+
+-- Messages the owner sends from the portal: the backend queues them here and the bot,
+-- which is the only thing holding the WhatsApp connection, picks them up within seconds
+-- and sends them from the bot number. Quiet hours still apply — a message queued at 2am
+-- goes out at 6am.
+create table if not exists wa_outbox (
+  id         bigserial primary key,
+  jid        text not null,
+  phone      text not null default '',
+  text       text not null,
+  status     text not null default 'pending' check (status in ('pending','sent','failed')),
+  error      text,
+  created_at timestamptz not null default now(),
+  sent_at    timestamptz
+);
+create index if not exists idx_wa_outbox_pending on wa_outbox(status, id) where status = 'pending';

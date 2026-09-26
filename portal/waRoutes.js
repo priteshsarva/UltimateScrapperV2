@@ -9,7 +9,7 @@ import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { bestMatch, worthLearning, isStalling, isOneOff } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
-import { converse, draftReply, reengage, extraNotes, aiUsage } from "./waGemini.js";
+import { converse, draftReply, reengage, openerFor, extraNotes, aiUsage } from "./waGemini.js";
 import { searchCatalogue } from "./catalogueSearch.js";
 import { createDemoStore, expireDemos, liveDemos, DEMO_DAYS } from "./waDemo.js";
 import { saveSettings } from "./settings.js";
@@ -614,6 +614,21 @@ waInternalRoutes.post("/leads/outcome", wrap(async (req, res) => {
   res.json({ updated: r.rowCount, lead: r.rows[0] || null });
 }));
 
+// The bot's side of the portal "Send" button: take the queued messages, then report back.
+waInternalRoutes.get("/outbox", wrap(async (req, res) => {
+  const rows = (await query(
+    `select id, jid, phone, text from wa_outbox where status='pending' order by id limit 10`)).rows;
+  res.json({ messages: rows });
+}));
+
+waInternalRoutes.post("/outbox/:id/done", wrap(async (req, res) => {
+  const ok = req.body?.ok !== false;
+  await query(
+    `update wa_outbox set status=$2, error=$3, sent_at=now() where id=$1 and status='pending'`,
+    [req.params.id, ok ? "sent" : "failed", ok ? null : String(req.body?.error || "").slice(0, 200)]);
+  res.json({ ok: true });
+}));
+
 // Build a demo store by hand ("demo 98xxxxxxxx Shop Name" from the owner), and the
 // housekeeping the bot's tick calls: pause the ones past their 7 days, list the live ones.
 waInternalRoutes.post("/demo/create", wrap(async (req, res) => {
@@ -827,6 +842,53 @@ waAdminRoutes.get("/questions", wrap(async (req, res) => {
     `select q.*, u.email from wa_questions q left join users u on u.id = q.user_id
       where q.status=$1 order by q.created_at desc limit 200`, [status])).rows;
   res.json({ questions: rows });
+}));
+
+// The opener behind the Leads screen's "Continue on WhatsApp" button: written from THAT
+// chat, not a template. Cached briefly in memory — reopening the same lead twice shouldn't
+// cost two AI calls — and ?refresh=1 writes a fresh one.
+const openerCache = new Map();   // phone -> { at, text }
+const OPENER_TTL = 30 * 60e3;
+waAdminRoutes.get("/leads/:phone/opener", wrap(async (req, res) => {
+  const phone = digits(req.params.phone);
+  const hit = openerCache.get(phone);
+  if (hit && !req.query.refresh && Date.now() - hit.at < OPENER_TTL) return res.json({ text: hit.text, cached: true });
+
+  const lead = (await query(`select * from wa_leads where right(phone,10)=$1 limit 1`, [phone.slice(-10)])).rows[0];
+  const history = lead?.jid ? (await query(
+    `select role, text from (select id, role, text from wa_messages where jid=$1 order by id desc limit 14) h order by id`,
+    [lead.jid])).rows : [];
+  const lang = (await query(`select lang from wa_contacts where phone=$1`, [phone])).rows[0]?.lang || "hinglish";
+
+  const out = await openerFor({ history, contact: await contactFor(phone), lead, lang });
+  if (!out?.reply) return res.json({ text: "", error: "AI is busy right now — type your own message." });
+  openerCache.set(phone, { at: Date.now(), text: out.reply });
+  res.json({ text: out.reply, cached: false, messages: history.length });
+}));
+
+// "Send" on the Leads screen. The backend can't reach WhatsApp — only the bot holds that
+// connection — so the message is queued and the bot picks it up within seconds.
+waAdminRoutes.post("/leads/:phone/send", wrap(async (req, res) => {
+  const phone = digits(req.params.phone);
+  const text = String(req.body?.text || "").trim();
+  if (!text) return res.status(400).json({ error: "nothing to send" });
+  if (phone.length < 10) return res.status(400).json({ error: "bad number" });
+
+  // Prefer the jid we've actually been talking on (it may be a privacy @lid id).
+  const known = (await query(
+    `select coalesce(l.jid, c.jid) as jid from wa_leads l
+       full join wa_chats c on right(c.phone,10) = right(l.phone,10)
+      where right(coalesce(l.phone, c.phone),10) = $1 limit 1`, [phone.slice(-10)])).rows[0];
+  const jid = known?.jid || `${phone.length === 10 ? "91" + phone : phone}@s.whatsapp.net`;
+
+  const row = (await query(
+    `insert into wa_outbox (jid, phone, text) values ($1,$2,$3) returning id`, [jid, phone, text])).rows[0];
+  // The bot must be allowed to talk in that chat, or it will ignore the reply that comes back.
+  await query(
+    `insert into wa_chats (jid, phone, started_by) values ($1,$2,'owner')
+     on conflict (jid) do update set status = case when wa_chats.status='legacy' then 'active' else wa_chats.status end,
+       phone = coalesce(nullif(excluded.phone,''), wa_chats.phone)`, [jid, phone]);
+  res.json({ queued: true, id: row.id });
 }));
 
 waAdminRoutes.get("/leads", wrap(async (req, res) => {

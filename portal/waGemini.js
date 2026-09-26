@@ -462,6 +462,44 @@ anything the guide already answers. Those are all yours — answer them.
   promise to come back, do not stall — say nothing at all and let the owner answer. A salesman who
   keeps saying "let me check" loses the room.`;
 
+// The owner is reopening a chat themselves from the portal's Leads screen. This writes the
+// message THEY will send: built from that one conversation, not a template — it picks up the
+// specific thing that was last said, and asks for the next step that fits where it stopped.
+export async function openerFor({ history = [], contact, lead, lang }) {
+  const recent = history.slice(-14);
+  const chat = recent.map((m) => `${m.role === "client" ? "THEM" : "YOU"}: ${m.text}`).join("\n");
+  const theirs = recent.filter((m) => m.role === "client").map((m) => m.text).join("\n");
+  const gap = recent.length ? "" : "\nThere is no chat history — this is a cold restart, so keep it very short and warm.";
+  const out = await ask(
+`${PLAYBOOK}
+
+WHAT YOU KNOW
+${knowledge(theirs || "store plan demo", theirs)}
+
+WHO YOU ARE TALKING TO
+${clientFacts(contact)}
+${leadFacts(lead)}
+THE CONVERSATION SO FAR
+${chat || "(nothing yet)"}${gap}
+
+SITUATION
+Time has passed and the owner is restarting this chat by hand. Write the ONE message he will send now.
+
+IT MUST:
+- pick up THIS conversation specifically — name the thing they actually said (their shop, their
+  numbers, the product they asked for, the objection they raised, the detail they still owe us)
+- move it one concrete step forward from exactly where it stopped: the free demo store if it was
+  never offered, the missing detail if the demo was agreed, their store link if a demo is running,
+  or a genuinely new angle if they went quiet
+- never mention the gap, never apologise for the delay, never say "just following up"
+- be 1-2 short WhatsApp lines in ${LANG_NAME[lang] || LANG_NAME.hinglish}, ending in one easy question
+- never repeat a line already in the conversation above
+
+Return JSON: {"reply": "<the message the owner will send>"}`);
+  const reply = String(out?.reply || "").trim();
+  return reply ? { reply, partial: !!out.partial } : null;
+}
+
 // The owner hasn't answered a question we passed to them and the client is sitting in
 // silence. Pick the conversation back up from a DIFFERENT angle — never mention the wait.
 export async function reengage({ history = [], contact, lang, pendingQuestion = "", lead }) {
