@@ -8,6 +8,10 @@ import { refreshSourceCategoriesFromDB } from "./categories.js";
 
 export const scrapeQueue = new PQueue({ concurrency: 1 });
 
+// Shared flag so the admin UI (and the per-source "Scrape now" button) know when the
+// big /devproductupdates rotator batch is running. index.js sets it around that loop.
+export const scrapeState = { batchRunning: false };
+
 // Enqueue a scrape for a source object (or id). Resolves when it has run.
 // Stamps last_scraped_at on completion so the rotator advances naturally —
 // this is why both the rotator and on-demand scrapes go through here.

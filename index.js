@@ -35,7 +35,7 @@ import enrollmentRoutes from "./portal/enrollmentRoutes.js";
 import adminRoutes from "./portal/adminRoutes.js";
 import sourceRoutes from "./portal/sourceRoutes.js";
 import { nextSourceToScrape } from './portal/sources.js';
-import { enqueueScrape } from './portal/scrapeQueue.js';
+import { enqueueScrape, scrapeState } from './portal/scrapeQueue.js';
 import { scrapeRequestRoutes, adminScrapeRequestRoutes } from "./portal/scrapeRequestRoutes.js";
 import { sourceCategoryRoutes, adminSourceCategoryRoutes } from "./portal/categoryRoutes.js";
 import enrollmentSourceRoutes from "./portal/enrollmentSourceRoutes.js";
@@ -372,14 +372,20 @@ app.get('/devproductupdates', async (req, res) => {
         gitAutoCommitAndPush();
         res.status(200).json({ status: 200, message: `Scrapping started at: ${formattedDate}` });
 
-        for (const site of SITES_REGISTRY) {
-            console.log(site.searchKey);
-            // Execute the rotator and this also executeScraper
-            await runRotator();
-            // await executeScraper(site.searchKey);
+        // Flag the batch so the admin "Scrape now" button disables while it runs.
+        scrapeState.batchRunning = true;
+        try {
+            for (const site of SITES_REGISTRY) {
+                console.log(site.searchKey);
+                // Execute the rotator and this also executeScraper
+                await runRotator();
+                // await executeScraper(site.searchKey);
 
+            }
+            gitAutoCommitAndPush();
+        } finally {
+            scrapeState.batchRunning = false;
         }
-        gitAutoCommitAndPush();
 
     } catch (error) {
         // The 200 above is already sent (fire-and-forget); the scrape loop runs

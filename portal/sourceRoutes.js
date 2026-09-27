@@ -2,6 +2,7 @@
 import { Router } from "express";
 import { requireAuth, requireAdmin } from "./auth.js";
 import { listSources, getSource, upsertSource, setSourceStatus, deleteSource } from "./sources.js";
+import { enqueueScrape, scrapeQueueDepth, scrapeState } from "./scrapeQueue.js";
 
 const router = Router();
 router.use(requireAuth, requireAdmin);
@@ -9,6 +10,26 @@ router.use(requireAuth, requireAdmin);
 // GET /portal/admin/sources?status=active
 router.get("/", async (req, res) => {
   res.json({ sources: await listSources({ status: req.query.status }) });
+});
+
+// GET /portal/admin/sources/scrape-status  -> is the big update running, + queue depth
+// (must be declared before any "/:id" route so it isn't captured as an id).
+router.get("/scrape-status", (_req, res) => {
+  res.json({ batchRunning: !!scrapeState.batchRunning, depth: scrapeQueueDepth() });
+});
+
+// POST /portal/admin/sources/:id/scrape  -> scrape this one source now (on-demand).
+// Goes through the shared single-runner queue, so it never collides with the rotator.
+// Refused while the /devproductupdates batch is running.
+router.post("/:id/scrape", async (req, res) => {
+  if (scrapeState.batchRunning)
+    return res.status(409).json({ error: "A full product update is running — try again once it finishes." });
+  const source = await getSource(req.params.id);
+  if (!source) return res.status(404).json({ error: "Source not found" });
+  if (source.method === "MANUAL")
+    return res.status(400).json({ error: "This source is MANUAL (not auto-scraped)." });
+  enqueueScrape(source);   // fire-and-forget; resolves in the background
+  res.json({ queued: true, depth: scrapeQueueDepth() });
 });
 
 // POST /portal/admin/sources   { id, name, category, method, base_url, search_key }
