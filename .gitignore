@@ -1,5 +1,10 @@
 /controller/images
+# Scraper image scratch output. Untracked, unused by delivery (the plugin uses
+# source image URLs), and some brand folders end in a dot — which Windows can't
+# open, breaking `git add .` in /updateserver + /devproductupdates. Skip them.
+/core/strategies/images
 /node_modules
+
 # Chrome temp profiles (TMPDIR setup in index.js) — never committed:
 # /updateserver and /devproductupdates run `git add .`
 /.tmp
