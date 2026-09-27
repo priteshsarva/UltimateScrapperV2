@@ -382,8 +382,11 @@ app.get('/devproductupdates', async (req, res) => {
         gitAutoCommitAndPush();
 
     } catch (error) {
+        // The 200 above is already sent (fire-and-forget); the scrape loop runs
+        // after it. A failing scrape must NOT try to respond again — that throws
+        // ERR_HTTP_HEADERS_SENT and crashes the process. Just log.
         console.error('Error:', error.message);
-        res.status(500).json({ status: 500, message: 'Internal Server Error' });
+        if (!res.headersSent) res.status(500).json({ status: 500, message: 'Internal Server Error' });
     }
 
 })

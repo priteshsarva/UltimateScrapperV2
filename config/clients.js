@@ -17,6 +17,14 @@ export const CLIENT_CONFIGS = {
             { database: "watches", manufacturers: "all" },
             { database: "shoes", manufacturers: "all" }
         ]
+    },
+      "sunglass.in": {
+        name: "sunglass",
+        access: [
+
+            { database: "sunglasses", manufacturers: "all" }
+
+        ]
     }
     // "stylenova.co.in" removed 2026-08 — off direct-push, DNS dead.
 };
