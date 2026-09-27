@@ -804,6 +804,21 @@ adminRouter.delete("/hosted-sites/:id", asyncH(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// POST /portal/admin/hosted-sites/:id/transfer  { email }  -> hand a store to a client.
+// Lets an admin build a demo store under their own account, then transfer it to the
+// real owner once it's finalised. Reassigns the enrollment's user_id; branding,
+// orders and settings (keyed by enrollment_id) all follow the store.
+adminRouter.post("/hosted-sites/:id/transfer", asyncH(async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: "Client email required" });
+  const user = (await query(`select id, email from users where lower(email)=$1`, [email])).rows[0];
+  if (!user) return res.status(404).json({ error: `No account found for ${email}` });
+  const { rowCount } = await query(
+    `update enrollments set user_id=$1 where id=$2 and type='hosted'`, [user.id, req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: "Site not found" });
+  res.json({ ok: true, owner_email: user.email });
+}));
+
 // GET /portal/admin/orders?enrollment_id=&status=  -> every order, every vendor
 adminRouter.get("/orders", asyncH(async (req, res) => {
   const { enrollment_id, status } = req.query;

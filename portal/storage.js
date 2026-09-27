@@ -6,7 +6,7 @@
 //
 // .env:
 //   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET, R2_PUBLIC_URL
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import sharp from "sharp";
 import crypto from "crypto";
 
@@ -54,4 +54,22 @@ export async function deleteObject(key) {
   if (!isConfigured() || !key) return;
   try { await client().send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key })); }
   catch (e) { console.error("[storage] delete failed", key, e.message); }
+}
+
+// Storefront branding images (logo / favicon / hero / review shots). Same WebP
+// treatment as product images, under a dedicated "storefront/" prefix so the
+// orphan-cleanup can scope to just these and never touch product/shipment images.
+export const putStorefrontImage = (buffer) => putProductImage(buffer, "storefront");
+
+// List every object under a prefix (paginated). -> [{ key, lastModified }]
+export async function listObjects(prefix) {
+  if (!isConfigured()) return [];
+  const out = [];
+  let token;
+  do {
+    const r = await client().send(new ListObjectsV2Command({ Bucket: R2_BUCKET, Prefix: prefix, ContinuationToken: token }));
+    for (const o of r.Contents || []) out.push({ key: o.Key, lastModified: o.LastModified });
+    token = r.IsTruncated ? r.NextContinuationToken : undefined;
+  } while (token);
+  return out;
 }

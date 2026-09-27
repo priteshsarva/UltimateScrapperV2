@@ -10,6 +10,7 @@ import { sendPaymentReminderEmail } from "./orderEmails.js";
 import { notify } from "./notifications.js";
 import { reverifyListingsTick, purgeShipmentPhotosTick } from "./wholesaleCron.js";
 import { runCatalogueScan } from "./catalogueScan.js";
+import { purgeStorefrontImagesTick } from "./storefrontImageCron.js";
 
 // Hosted storefronts get a 5-day grace after their plan expires: the store stays
 // live, but the owner is emailed (up to 3×/day) and gets an in-portal notification.
@@ -183,6 +184,10 @@ export function startScheduler() {
       // storefront unpaid-order reminders: once/day
       cron.default.schedule("0 10 * * *", () => {
         unpaidOrderReminderTick().then((r) => console.log("[unpaid-order] tick", r)).catch((e) => console.error("[unpaid-order] tick:", e.message));
+      });
+      // reclaim orphaned storefront images (uploaded but never linked) after 30 days
+      cron.default.schedule("45 3 * * *", () => {
+        purgeStorefrontImagesTick().then((r) => console.log("[storefront-img] purge", r)).catch((e) => console.error("[storefront-img] purge:", e.message));
       });
       console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30; wholesale maintenance at 08:15");
     })

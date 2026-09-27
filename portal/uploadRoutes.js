@@ -4,7 +4,7 @@
 import { Router } from "express";
 import multer from "multer";
 import { requireAuth } from "./auth.js";
-import { isConfigured, putProductImage, putShipmentPhoto } from "./storage.js";
+import { isConfigured, putProductImage, putShipmentPhoto, putStorefrontImage } from "./storage.js";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 10 } });
 const router = Router();
@@ -20,6 +20,19 @@ router.post("/wholesale/upload", requireAuth, upload.array("files", 10), async (
     if (!files.length) return res.status(400).json({ error: "No files uploaded" });
     const out = [];
     for (const f of files) out.push(await putProductImage(f.buffer));
+    res.json({ files: out, urls: out.map((o) => o.url) });
+  } catch (e) { console.error("[upload]", e.message); res.status(500).json({ error: e.message }); }
+});
+
+// Storefront branding images (logo, favicon, hero, review shots) — stored under the
+// "storefront/" prefix so the 30-day orphan-cleanup can reclaim unused ones.
+router.post("/storefront/upload", requireAuth, upload.array("files", 10), async (req, res) => {
+  try {
+    if (!isConfigured()) return res.status(503).json({ error: "Image storage is not configured. Paste an image URL instead." });
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: "No files uploaded" });
+    const out = [];
+    for (const f of files) out.push(await putStorefrontImage(f.buffer));
     res.json({ files: out, urls: out.map((o) => o.url) });
   } catch (e) { console.error("[upload]", e.message); res.status(500).json({ error: e.message }); }
 });

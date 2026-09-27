@@ -92,4 +92,25 @@ router.post("/enrollments/:id/activate", async (req, res) => {
   res.json({ ok: true, expiry_date: newExpiry });
 });
 
+// DELETE /portal/admin/enrollments/:id  -> remove an enrollment and its key
+// permanently (cascades sources etc). Used from the plugin sign-ups screen.
+router.delete("/enrollments/:id", async (req, res) => {
+  const { rows } = await query(`delete from enrollments where id=$1 returning domain`, [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Not found" });
+  await audit(req.user.email, "Deleted enrollment", rows[0].domain);
+  res.json({ ok: true });
+});
+
+// POST /portal/admin/enrollments/:id/clear-mismatch  -> clear the "key used from an
+// unrecognized domain" warning once it's been reviewed.
+router.post("/enrollments/:id/clear-mismatch", async (req, res) => {
+  const { rows } = await query(
+    `update enrollments set last_mismatch_domain=null, last_mismatch_at=null where id=$1 returning domain`,
+    [req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: "Not found" });
+  await audit(req.user.email, "Cleared key mismatch", rows[0].domain);
+  res.json({ ok: true });
+});
+
 export default router;
