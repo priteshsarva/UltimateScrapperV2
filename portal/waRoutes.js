@@ -7,11 +7,12 @@ import { Router } from "express";
 import crypto from "crypto";
 import { query } from "./db.js";
 import { requireAuth, requireAdmin } from "./auth.js";
-import { bestMatch, worthLearning, isStalling, isOneOff } from "./waMatch.js";
+import { bestMatch, worthLearning, isStalling, isOneOff, isAutoReply } from "./waMatch.js";
 import { startInvoicePayment } from "./paymentRoutes.js";
 import { converse, draftReply, reengage, openerFor, extraNotes, aiUsage } from "./waGemini.js";
 import { searchCatalogue } from "./catalogueSearch.js";
 import { createDemoStore, expireDemos, liveDemos, DEMO_DAYS } from "./waDemo.js";
+import { parseSheet, importRows, nextBatch, markSent, markReplied, stopSilent, newlyQualified, campaignStats, campaignSettings, exportSheet, OPENERS, QUALIFY } from "./waCampaign.js";
 import { saveSettings } from "./settings.js";
 
 const APP_URL = process.env.APP_URL || "http://localhost:5174";
@@ -21,6 +22,14 @@ const PORTAL_LINE = {
   en: "Full range and prices here",
   hinglish: "Poora collection aur prices yahan dekhiye",
   hi: "पूरा कलेक्शन और प्राइस यहाँ देखिए",
+};
+// They gave their own wholesaler's site and we don't scrape it yet. The store is live with our
+// suppliers meanwhile; theirs is queued for the owner to add. Never let them find this out by
+// opening the store and not seeing their maal.
+const SUPPLIER_PENDING = {
+  en: (s) => `${s} isn't connected yet — I've put it in to be added, usually a day. Our suppliers' stock is already in there so you can see how it looks.`,
+  hinglish: (s) => `${s} abhi connect nahi hai — add karne ke liye laga diya hai, ek din lagta hai. Filhaal hamare suppliers ka maal dikh raha hai, dekh lijiye kaisa lagta hai.`,
+  hi: (s) => `${s} अभी जुड़ा नहीं है — जोड़ने के लिए लगा दिया है, एक दिन लगता है। फ़िलहाल हमारे सप्लायर का माल दिख रहा है, देख लीजिए कैसा लगता है।`,
 };
 // Asked for a product and nothing in stock came back: say so, never "haan ji, yeh dekhiye".
 const NOT_FOUND_LINE = {
@@ -169,10 +178,14 @@ const LEAD_FIELDS = ["name", "business", "city", "sells", "shops", "online_alrea
 const RANK = (s) => `array_position(array['cold','warm','hot'], ${s})`;
 const KEEP_SCORE = `(wa_leads.score_at > now() - interval '72 hours'
                      and ${RANK("wa_leads.score")} > ${RANK("excluded.score")})`;
+// The concrete asks that earned the owner's time in the real outreach chats. Anything the
+// model invents beyond this list is dropped — a free-text signal would drift into a mood.
+export const SIGNALS = ["call", "reference", "migrate", "supplier", "sourcing", "numbers", "paying", "stall"];
 async function saveLead(phone, jid, ai) {
   const p = digits(phone);
   if (!p || !ai?.lead) return;
   const vals = LEAD_FIELDS.map((f) => String(ai.lead[f] || "").trim().slice(0, 300) || null);
+  const signals = [...new Set((Array.isArray(ai.signals) ? ai.signals : []).filter((s) => SIGNALS.includes(s)))];
   const score = ["hot", "warm", "cold"].includes(ai.score) ? ai.score : "cold";
   const STAGES = ["new", "talking", "demo_offered", "demo_yes", "details", "ready", "not_interested"];
   const stage = STAGES.includes(ai.stage) ? ai.stage : null;
@@ -180,10 +193,12 @@ async function saveLead(phone, jid, ai) {
   // can't drag someone who already gave their details back to "talking".
   const RANK = `array_position($${LEAD_FIELDS.length + 5}::text[], excluded.stage) >= array_position($${LEAD_FIELDS.length + 5}::text[], wa_leads.stage)`;
   await query(
-    `insert into wa_leads (phone, jid, ${LEAD_FIELDS.join(", ")}, score, score_reason, score_at, stage)
-     values ($1,$2,${LEAD_FIELDS.map((_, i) => `$${i + 3}`).join(",")},$${LEAD_FIELDS.length + 3},$${LEAD_FIELDS.length + 4}, now(), coalesce($${LEAD_FIELDS.length + 6},'new'))
+    `insert into wa_leads (phone, jid, ${LEAD_FIELDS.join(", ")}, score, score_reason, score_at, stage, signals)
+     values ($1,$2,${LEAD_FIELDS.map((_, i) => `$${i + 3}`).join(",")},$${LEAD_FIELDS.length + 3},$${LEAD_FIELDS.length + 4}, now(), coalesce($${LEAD_FIELDS.length + 6},'new'),$${LEAD_FIELDS.length + 7})
      on conflict (phone) do update set
        ${LEAD_FIELDS.map((f) => `${f} = coalesce(excluded.${f}, wa_leads.${f})`).join(", ")},
+       signals = (select coalesce(jsonb_agg(distinct v), '[]'::jsonb)
+                    from jsonb_array_elements(wa_leads.signals || excluded.signals) v),
        score = case when ${KEEP_SCORE} then wa_leads.score else excluded.score end,
        score_reason = case when ${KEEP_SCORE} then wa_leads.score_reason else excluded.score_reason end,
        score_at = case when ${KEEP_SCORE} then wa_leads.score_at else now() end,
@@ -191,7 +206,7 @@ async function saveLead(phone, jid, ai) {
                     when excluded.stage = 'not_interested' or ${RANK} then excluded.stage
                     else wa_leads.stage end,
        jid = coalesce(excluded.jid, wa_leads.jid), updated_at = now()`,
-    [p, jid || null, ...vals, score, String(ai.score_reason || "").slice(0, 300) || null, STAGES, stage]);
+    [p, jid || null, ...vals, score, String(ai.score_reason || "").slice(0, 300) || null, STAGES, stage, JSON.stringify(signals)]);
 }
 
 // Remember a good AI answer so the bot can still reply when Gemini is down.
@@ -248,7 +263,7 @@ waInternalRoutes.post("/reply", async (req, res) => {
       contactFor(phone),
       // What we already learned about them, from earlier days too: the history above is only
       // today's few messages, so without this the model re-asks and re-scores from scratch.
-      query(`select ${LEAD_FIELDS.join(", ")}, score from wa_leads where phone=$1`, [digits(phone)]),
+      query(`select ${LEAD_FIELDS.join(", ")}, score, stage, signals from wa_leads where phone=$1`, [digits(phone)]),
     ]);
     const LEARNED = "[learned from an earlier chat, NOT the owner's words — the guide wins] ";
     const savedFaqs = faqs.rows.map((f) => f.source === "owner" ? f : {
@@ -311,9 +326,16 @@ waInternalRoutes.post("/reply", async (req, res) => {
         const d = await createDemoStore({
           phone, name: ai.lead?.name || name, store_name: ai.lead?.store_name,
           sells: ai.lead?.sells, whatsapp: ai.lead?.whatsapp_for_orders, city: ai.lead?.city,
+          // their own wholesaler, if they gave one: the store is built from that supplier
+          supplier_links: ai.lead?.supplier_links,
         }).catch((e) => { console.error("[wa-demo]", e.message); return null; });
         if (d) reply += `\n${d.url}`;
         else reply += `\n${APP_URL}`;   // couldn't build it — never leave them with nothing
+        // They named a wholesaler we don't crawl yet. Say so rather than let them open the
+        // store and wonder where their supplier's goods are — it's now queued for the owner.
+        if (d?.pending_suppliers?.length) {
+          reply += `\n\n${(SUPPLIER_PENDING[lang] || SUPPLIER_PENDING.hinglish)(d.pending_suppliers.join(", "))}`;
+        }
       }
       if (ai.action === "pay_link" && contact.invoices?.length) {
         const inv = (await query(`select * from invoices where id=$1`, [contact.invoices[0].id])).rows[0];
@@ -514,6 +536,10 @@ waInternalRoutes.post("/chats/event", async (req, res) => {
         where c.jid=$1 or ($2 <> '' and c.phone=$2)
         order by (c.status='legacy') desc, (c.jid=$1) desc limit 1`, [jid, phone])).rows[0];
     const created = !chat;
+    // A WhatsApp Business greeting answering our opener within seconds. Not a reply: the
+    // bot is told to say nothing back, the campaign clock keeps running, and the number
+    // gets dropped after the usual silence instead of sitting there looking answered.
+    const auto = dir === "in" && isAutoReply(req.body?.text);
     if (!chat) {
       chat = (await query(
         `insert into wa_chats (jid, phone, started_by) values ($1,$2,$3)
@@ -523,12 +549,14 @@ waInternalRoutes.post("/chats/event", async (req, res) => {
     // The phone is recorded whatever the status: a legacy chat stored under a LID-only id
     // has no phone, and without it "on <number>" can never find the chat to switch it on.
     await query(
-      chat.status !== "active" ? `update wa_chats set phone=coalesce(nullif($2,''), phone) where jid=$1`
+      chat.status !== "active" || auto ? `update wa_chats set phone=coalesce(nullif($2,''), phone) where jid=$1`
         : dir === "in"
-          ? `update wa_chats set last_in_at=now(), followups=0, phone=coalesce(nullif($2,''), phone) where jid=$1`
+          // they answered an outreach message: the campaign clock stops, the assistant has it now
+          ? (markReplied(phone).catch(() => {}),
+             `update wa_chats set last_in_at=now(), followups=0, phone=coalesce(nullif($2,''), phone) where jid=$1`)
           : `update wa_chats set last_out_at=now(), phone=coalesce(nullif($2,''), phone) where jid=$1`,
       [chat.jid, phone]);
-    res.json({ chat, created });
+    res.json({ chat, created, auto });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -592,6 +620,10 @@ waInternalRoutes.get("/chats/due", async (req, res) => {
           and (c.last_in_at is null or c.last_out_at > c.last_in_at)
           and c.last_out_at < now() - make_interval(days => $1)
           and not exists (select 1 from wa_questions q where q.jid=c.jid and q.status='pending')
+          -- never nudge a cold outreach number that hasn't replied: the campaign's own rule
+          -- is to stop after CAMPAIGN_STOP_DAYS, and a nudge to silence is what gets a number reported
+          and not exists (select 1 from wa_campaign cm
+                           where right(cm.phone,10) = right(c.phone,10) and cm.replied_at is null)
         order by c.last_out_at limit 30`, [days, max])).rows;
     res.json({ chats: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -614,7 +646,26 @@ waInternalRoutes.post("/leads/outcome", wrap(async (req, res) => {
   res.json({ updated: r.rowCount, lead: r.rows[0] || null });
 }));
 
-// The bot's side of the portal "Send" button: take the queued messages, then report back.
+// ---- outreach campaign (numbers from a spreadsheet) --------------------------
+// The bot asks for the next few numbers, sends both openers, and reports back.
+waInternalRoutes.get("/campaign/next", wrap(async (req, res) => {
+  res.json({ contacts: await nextBatch(), openers: OPENERS });
+}));
+
+waInternalRoutes.post("/campaign/:id/sent", wrap(async (req, res) => {
+  await markSent(req.params.id, req.body?.ok !== false, req.body?.error);
+  res.json({ ok: true });
+}));
+
+// Housekeeping the bot's tick runs: stop chasing silence, and hand qualified ones over.
+waInternalRoutes.post("/campaign/tick", wrap(async (req, res) => {
+  const stopped = await stopSilent();
+  const qualified = await newlyQualified();
+  res.json({ stopped: stopped.length, qualified });
+}));
+
+// ---- the portal "Send" button --------------------------------------------------
+// The bot's side of it: take the queued messages, then report back.
 waInternalRoutes.get("/outbox", wrap(async (req, res) => {
   const rows = (await query(
     `select id, jid, phone, text from wa_outbox where status='pending' order by id limit 10`)).rows;
@@ -891,12 +942,61 @@ waAdminRoutes.post("/leads/:phone/send", wrap(async (req, res) => {
   res.json({ queued: true, id: row.id });
 }));
 
+// Upload the sheet (sent as base64 so we don't need a multipart parser here).
+waAdminRoutes.post("/campaign/upload", wrap(async (req, res) => {
+  const { base64, filename } = req.body || {};
+  if (!base64) return res.status(400).json({ error: "no file" });
+  const { rows } = parseSheet(base64);
+  if (!rows.length) return res.status(400).json({ error: "no rows found — is the mobile number in the first column?" });
+  const result = await importRows(rows, filename);
+  res.json({ ...result, stats: await campaignStats() });
+}));
+
+waAdminRoutes.get("/campaign", wrap(async (req, res) => {
+  const rows = (await query(
+    `select c.*, l.score, l.stage, l.business, l.demo_slug
+       from wa_campaign c left join wa_leads l on right(l.phone,10) = right(c.phone,10)
+      order by case c.status when 'qualified' then 1 when 'replied' then 2 when 'sent' then 3
+                             when 'pending' then 4 else 5 end, c.id desc limit 300`)).rows;
+  res.json({ rows, stats: await campaignStats() });
+}));
+
+// When cold outreach may go out, and how many a day. Editable here so it needs no deploy.
+waAdminRoutes.put("/campaign/settings", wrap(async (req, res) => {
+  const { from, to, per_day } = req.body || {};
+  const cur = await campaignSettings();
+  const next = {
+    from: Number.isFinite(+from) ? Math.min(23, Math.max(0, Math.floor(+from))) : cur.from,
+    to: Number.isFinite(+to) ? Math.min(24, Math.max(1, Math.floor(+to))) : cur.to,
+    per_day: Number.isFinite(+per_day) ? Math.min(500, Math.max(1, Math.floor(+per_day))) : cur.per_day,
+  };
+  if (next.to <= next.from) return res.status(400).json({ error: "the end hour must be after the start hour" });
+  await saveSettings("wa_campaign", next);
+  res.json(next);
+}));
+
+waAdminRoutes.get("/campaign/export", wrap(async (req, res) => {
+  res.json({ filename: `kartify-campaign-${new Date().toISOString().slice(0, 10)}.xlsx`, base64: await exportSheet() });
+}));
+
+// Stop the campaign / restart it — pending rows are what the bot picks from.
+waAdminRoutes.post("/campaign/pause", wrap(async (req, res) => {
+  const r = await query(`update wa_campaign set status='skipped' where status='pending' returning id`);
+  res.json({ paused: r.rowCount });
+}));
+waAdminRoutes.post("/campaign/resume", wrap(async (req, res) => {
+  const r = await query(`update wa_campaign set status='pending' where status='skipped' returning id`);
+  res.json({ resumed: r.rowCount });
+}));
+
 waAdminRoutes.get("/leads", wrap(async (req, res) => {
   const score = ["hot", "warm", "cold"].includes(req.query.score) ? req.query.score : null;
+  // Anyone who made a concrete ask comes first — that, not the score, is who to ring today.
   const rows = (await query(
     `select * from wa_leads ${score ? "where score=$1" : ""}
-      order by case score when 'hot' then 1 when 'warm' then 2 else 3 end, updated_at desc limit 300`,
-    score ? [score] : [])).rows;
+      order by (signals ?| $${score ? 2 : 1}::text[]) desc,
+               case score when 'hot' then 1 when 'warm' then 2 else 3 end, updated_at desc limit 300`,
+    score ? [score, QUALIFY] : [QUALIFY])).rows;
   res.json({ leads: rows });
 }));
 

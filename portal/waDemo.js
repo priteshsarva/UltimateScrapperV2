@@ -17,6 +17,7 @@ import crypto from "crypto";
 import { query } from "./db.js";
 import { generateEnrollmentKey } from "./keys.js";
 import { PRESETS } from "./storefrontPresets.js";
+import { sanitizeCategory } from "./sources.js";
 
 const PLATFORM_HOST = (process.env.PLATFORM_HOST || "thekartify.com").toLowerCase().replace(/^\.+|\.+$/g, "");
 export const DEMO_DAYS = Number(process.env.WA_DEMO_DAYS || 7);
@@ -53,40 +54,89 @@ async function userForPhone(phone, name) {
     [String(name || "").slice(0, 80) || null, canonMobile(phone)])).rows[0].id;
 }
 
-// Everything the storefront needs to show products: whichever live sources match what they
-// sell, else every live source. categories '{}' means "all of this source's categories".
-async function attachSources(enrollmentId, sells) {
-  const all = (await query(`select id, name, category from sources where status='active'`)).rows;
-  if (!all.length) return 0;
-  const want = String(sells || "").toLowerCase();
-  const matched = want
-    ? all.filter((s) => want.includes(String(s.category).toLowerCase()) ||
-                        String(s.category).toLowerCase().includes(want.split(/[ ,]/)[0] || "\u0000"))
+// Which suppliers a demo store carries. categories '{}' means "all of this source's categories".
+//
+// First choice is always the wholesaler THEY named. Their own supplier's goods on their own
+// store is the whole hook, so the assistant asks for that link (knowledge/15-demo.md, detail 6)
+// and it is kept in wa_leads.supplier_links. We can only attach a site we already crawl —
+// one we've never seen has to be added and scraped first, so it comes back as `missing` and
+// becomes a source request for the owner rather than a promise nobody actioned.
+//
+// No supplier named (or we don't have theirs): PER_CATEGORY at random from every category.
+// Not all of them — a store carrying every supplier we have looks like a scrape, not a shop —
+// and random so two demos built the same afternoon don't look like the same shop.
+// ponytail: every category gets a share. If the catalogue grows past a handful of niches,
+// narrow this to the categories their `sells` mentions.
+const PER_CATEGORY = Number(process.env.WA_DEMO_SOURCES_PER_CATEGORY || 4);
+
+const hostOf = (s) => String(s || "").trim().toLowerCase()
+  .replace(/^[a-z]+:\/\//, "").replace(/^www\./, "").split(/[/?#:]/)[0];
+// treat shop.x.com and x.com as the same wholesaler
+const sameHost = (a, b) => !!a && !!b && (a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`));
+
+// `fill` is off when the store already exists: a supplier link that arrives two messages after
+// the build still gets attached, but the random ones must NOT be added a second time.
+async function attachSources(enrollmentId, { supplierLinks, userId, sells, fill = true }) {
+  const wanted = [...new Set(String(supplierLinks || "").split(/[\s,;|]+/)
+    .map(hostOf).filter((h) => /\.[a-z]{2,}$/.test(h)))];
+
+  const theirs = wanted.length
+    ? (await query(`select id, name, base_url from sources where status='active'`)).rows
+        .filter((s) => wanted.some((w) => sameHost(hostOf(s.base_url), w)))
     : [];
-  const chosen = (matched.length ? matched : all).slice(0, 12);
+  const missing = wanted.filter((w) => !theirs.some((s) => sameHost(hostOf(s.base_url), w)));
+
+  const chosen = theirs.length ? theirs : !fill ? [] : (await query(
+    `select id from (
+       select id, row_number() over (partition by category order by random()) as rn
+         from sources where status='active') s
+      where rn <= $1`, [PER_CATEGORY])).rows;
+
   for (const s of chosen) {
     await query(
       `insert into enrollment_sources (enrollment_id, source_id, categories) values ($1,$2,'{}')
        on conflict (enrollment_id, source_id) do nothing`, [enrollmentId, s.id]);
   }
-  return chosen.length;
+  // A wholesaler we don't crawl yet goes into the owner's existing source-approval queue.
+  // "Site ka link bhej do, add kar dete hain" is a promise the platform can keep — but only
+  // if it gets queued instead of sitting in a chat nobody re-reads. on conflict: the same
+  // link mentioned twice in one conversation must not become two requests.
+  for (const site of missing) {
+    await query(
+      `insert into scrape_requests (user_id, site_url, category)
+       select $1,$2,$3 where not exists (
+         select 1 from scrape_requests where user_id=$1 and site_url=$2 and status='pending')`,
+      [userId, `https://${site}`, sanitizeCategory(sells) || "other"]
+    ).catch((e) => console.error("[wa-demo] source request", site, e.message));
+  }
+  return { attached: chosen.length, theirs: theirs.map((s) => s.name), missing };
 }
 
-// -> { url, slug, expires_at, enrollment_id, user_id, products, reused }
-export async function createDemoStore({ phone, name, store_name, sells, whatsapp, city, logo_url }) {
+// -> { url, slug, expires_at, enrollment_id, user_id, sources, their_suppliers, pending_suppliers, reused }
+export async function createDemoStore({ phone, name, store_name, sells, whatsapp, city, logo_url, supplier_links }) {
   const storeName = String(store_name || name || "").trim().slice(0, 60);
   if (!storeName) throw Object.assign(new Error("store_name required"), { status: 400 });
 
   // One live demo per number: a second "bana do" returns the same link instead of a new store.
   const existing = (await query(
-    `select l.demo_slug, l.demo_expires_at, l.demo_enrollment_id, e.status
+    `select l.demo_slug, l.demo_expires_at, l.demo_enrollment_id, l.demo_user_id, e.status
        from wa_leads l join enrollments e on e.id = l.demo_enrollment_id
       where right(l.phone,10) = $1 and l.demo_expires_at > now() and e.status = 'active'`,
     [digits(phone).slice(-10)])).rows[0];
-  if (existing) return {
-    url: demoUrl(existing.demo_slug), slug: existing.demo_slug,
-    expires_at: existing.demo_expires_at, enrollment_id: existing.demo_enrollment_id, reused: true,
-  };
+  if (existing) {
+    // The demo is usually built as soon as the store name and what they sell are known, so
+    // their wholesaler often arrives afterwards. Attach it now (or queue it) rather than drop
+    // it on the floor just because the store is already live.
+    const late = supplier_links
+      ? await attachSources(existing.demo_enrollment_id,
+          { supplierLinks: supplier_links, userId: existing.demo_user_id, sells, fill: false })
+      : {};
+    return {
+      url: demoUrl(existing.demo_slug), slug: existing.demo_slug, reused: true,
+      expires_at: existing.demo_expires_at, enrollment_id: existing.demo_enrollment_id,
+      their_suppliers: late.theirs || [], pending_suppliers: late.missing || [],
+    };
+  }
 
   const userId = await userForPhone(phone, name);
   const slug = await uniqueSlug(slugify(storeName));
@@ -106,14 +156,16 @@ export async function createDemoStore({ phone, name, store_name, sells, whatsapp
      `Demo store — ${DEMO_DAYS} din ke liye. Apna banane ke liye account verify karke plan lijiye.`,
      JSON.stringify(PRESETS.commerce?.sections || [])]);
 
-  const products = await attachSources(enr.id, sells);
+  const { attached, theirs, missing } = await attachSources(enr.id, { supplierLinks: supplier_links, userId, sells });
+
   await query(
     `update wa_leads set demo_enrollment_id=$2, demo_slug=$3, demo_expires_at=$4, demo_user_id=$5,
             stage = case when stage in ('ready','details') then stage else 'details' end, updated_at=now()
       where right(phone,10) = $1`,
     [digits(phone).slice(-10), enr.id, slug, expiresAt, userId]);
 
-  return { url: demoUrl(slug), slug, expires_at: expiresAt, enrollment_id: enr.id, user_id: userId, products, reused: false };
+  return { url: demoUrl(slug), slug, expires_at: expiresAt, enrollment_id: enr.id, user_id: userId,
+           sources: attached, their_suppliers: theirs, pending_suppliers: missing, reused: false };
 }
 
 // Past its 7 days and still nobody has bought a plan -> pause it. Paused stores are
@@ -140,4 +192,19 @@ export async function liveDemos() {
        left join users u on u.id = l.demo_user_id
       where l.demo_enrollment_id is not null
       order by l.demo_expires_at desc limit 25`)).rows;
+}
+
+// Which supplier a demo store gets built from is the whole hook, and it turns on host
+// matching — run `node portal/waDemo.js` after touching hostOf/sameHost.
+if (import.meta.url === (await import("url")).pathToFileURL(process.argv[1] || "").href) {
+  const assert = (await import("assert")).strict;
+  assert.equal(hostOf("https://www.Shoemartt.in/collections/nike?page=2"), "shoemartt.in");
+  assert.equal(hostOf("shoemartt.in"), "shoemartt.in");
+  assert.equal(hostOf("http://srtrendyhub.cartpe.in:443/"), "srtrendyhub.cartpe.in");
+  assert.equal(sameHost("shoemartt.in", "shoemartt.in"), true);
+  assert.equal(sameHost("shop.shoemartt.in", "shoemartt.in"), true);   // their subdomain, our site
+  assert.equal(sameHost("shoemartt.in", "shoemartt.com"), false);      // different TLD, different shop
+  assert.equal(sameHost("myshoemartt.in", "shoemartt.in"), false);     // not a subdomain, just a suffix
+  assert.equal(sameHost("", "shoemartt.in"), false);
+  console.log("waDemo ok");
 }

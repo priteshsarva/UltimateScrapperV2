@@ -163,3 +163,32 @@ create table if not exists wa_outbox (
   sent_at    timestamptz
 );
 create index if not exists idx_wa_outbox_pending on wa_outbox(status, id) where status = 'pending';
+
+-- Outreach campaign: numbers uploaded from a spreadsheet. The bot sends the two opening
+-- messages, then the normal assistant takes over the reply. A row is 'stopped' when they
+-- never answered within CAMPAIGN_STOP_DAYS — we do not keep messaging silence.
+create table if not exists wa_campaign (
+  id          bigserial primary key,
+  phone       text not null,
+  name        text,
+  extra       jsonb not null default '{}'::jsonb,   -- the other columns of their row
+  file        text,                                  -- which upload it came from
+  row_no      int,
+  status      text not null default 'pending'
+                check (status in ('pending','sent','replied','qualified','stopped','failed','skipped')),
+  error       text,
+  sent_at     timestamptz,
+  replied_at  timestamptz,
+  qualified_at timestamptz,
+  created_at  timestamptz not null default now(),
+  unique (phone)
+);
+create index if not exists idx_wa_campaign_status on wa_campaign(status, id);
+
+-- Buying signals the assistant actually saw, e.g. ["call","reference","supplier"]. Qualification
+-- reads these, not the model's hot/warm/cold mood — three real outreach chats scored keen and
+-- closed nothing, while the one thing every genuinely live chat had in common was a concrete
+-- ask: a reference, a call, their supplier's link, or "can you move my existing site".
+-- Append-only, like stage: a vague message must never erase a signal already given.
+alter table wa_leads add column if not exists signals jsonb not null default '[]'::jsonb;
+create index if not exists idx_wa_leads_signals on wa_leads using gin (signals);

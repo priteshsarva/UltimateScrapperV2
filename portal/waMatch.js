@@ -133,6 +133,44 @@ const STALL = new RegExp([
 ].join("|"), "i");
 export const isStalling = (text) => STALL.test(String(text || ""));
 
+// A WhatsApp Business greeting answering our opener, not a person. Two of the three
+// reference chats did exactly this within five seconds: "THANK YOU FOR CONTACTING NAWAZ
+// WATCHES … JOIN GROUP … PLEASE SAVE MY NUMBER" and "*Welcome to SR Trendy Hub* *Return
+// Policy?* … Place Your Order On Website". Answering a robot burns an AI call, stops the
+// campaign clock and records a dead number as "replied". Two hallmarks are required so a
+// real person who happens to write "thanks for messaging" is never silenced.
+const AUTO_LINES = [
+  /thank(s| you)? for (contact|messag|reach|writ|enquir|your (message|enquiry|interest))/i,
+  /\bwelcome to\b.{0,40}(\n|\*)/i,
+  /(please |pls |kindly )?save (my|our) (number|contact)/i,
+  /(join|click).{0,20}(whatsapp )?group/i,
+  /(we|our team|our executive) will (get back|contact|call|reach|revert|reply)/i,
+  /(place|put|do) your order (on|from|through)/i,
+  /(business|working|office|shop) (hours?|timing)\s*[:\-]/i,
+  /(return|exchange|shipping) policy\s*[:?\-]/i,
+  /(daily|new) (status|update|stock) (update|will)/i,
+];
+export function isAutoReply(text) {
+  const t = String(text || "");
+  if (/\bauto(mated|-generated| reply| response|matic reply)\b/i.test(t)) return true;
+  if (t.length < 40) return false;                       // a greeting blob, never a "hi"
+  return AUTO_LINES.filter((re) => re.test(t)).length >= 2;
+}
+
+// The polite Indian no. Every reference chat ended on one of these — "I'll let you know
+// definitely", "currently out of station", "Great, I'll let you know" — and each time the
+// lead stayed marked keen while it was already dead. Sounds like a yes, closes nothing,
+// so it must never on its own put someone in front of the owner.
+const POLITE_NO = new RegExp([
+  "i'?ll let you know", "let you know (definitely|later|soon|when)", "will (let you know|tell you|inform|update you)",
+  "out of (station|town|country)", "bahar (hoon|hu|gaya|jaa)", "travel(ling)? (hoon|hu)",
+  "baad (me|mein) (baat|dekh|bata|kar)", "later (baat|me)", "abhi (nahi|busy|time nahi|free nahi)",
+  "(dekh|soch)(te|kar|ke)? (hain|hi?u|lenge|ke bata)", "think about it", "get back to you (later|soon)",
+  "not (right )?now", "filhaal", "next (month|week)", "agle (mahine|hafte)", "call you (back|later)",
+  "busy (hoon|hu|hun|chal)", "बाद में", "अभी नहीं", "सोचकर बता", "देख(ते|कर) ",
+].join("|"), "i");
+export const isPoliteNo = (text) => POLITE_NO.test(String(text || ""));
+
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   const assert = (await import("assert")).strict;
   const P = [
@@ -184,5 +222,18 @@ if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   for (const s of ["Main aapko batata hoon kaise kaam karta hai — products ready milte hain.",
                    "Delivery 1 se 3 din me ho jati hai ji.", "Standard plan ₹4,000 per month ka hai."])
     assert.equal(isStalling(s), false, s);
+  // verbatim from the reference chats, which is the only reason these two rules exist
+  assert.equal(isAutoReply("THANK YOU FOR CONTACTING NAWAZ WATCHES! PLEASE LET US KNOW HOW WE CAN HELP YOU.\n\nJOIN GROUP DILAY NEW WATCH UPDATE\nhttps://chat.whatsapp.com/xxx\n\nPLEASE SAVE MY NUMBER, I WILL KEEP GETTING DAILY STATUS AND NEW WATCH UPDATES."), true);
+  assert.equal(isAutoReply("*Welcome to SR Trendy Hub*\n\n*Return Policy ?*\nYes, We Have Exchange Policy\n\n*Want To Order?*\nPlace Your Order On Website.\n\nThanks Regards\nSrtrendyhub.cartpe.in"), true);
+  for (const t of ["Hi", "Aap khase ho", "Thanks Brother But Sello already Did this",
+                   "If you provide direct wholesaler base Website I'd like to Start with you.",
+                   "Use my website and to update all products in your site with some new features that I want.",
+                   "thanks for messaging bhai, kal baat karte hain"])
+    assert.equal(isAutoReply(t), false, t);
+  for (const t of ["Great\nI'll let you know", "Currently I am out of station", "When I available I'll let you know definitely",
+                   "abhi nahi bhai, next month dekhenge", "सोचकर बताता हूँ"])
+    assert.equal(isPoliteNo(t), true, t);
+  for (const t of ["Send me nam wholesale", "How can i trust you", "Is it possible?", "price kya hai", "haan demo bana do"])
+    assert.equal(isPoliteNo(t), false, t);
   console.log("waMatch ok");
 }
