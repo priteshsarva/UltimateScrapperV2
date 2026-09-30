@@ -43,9 +43,13 @@ export const openingHoursNow = async () => {
 };
 
 const digits = (p) => String(p ?? "").replace(/\D/g, "");
+// The country code is optional in the sheet — 9408386083, +91 94083 86083 and 919408386083 all
+// land on the same number. Leading zeros are dialling prefixes, not part of the number
+// (0 9408386083, 0091 9408386083), and an Indian mobile never starts with 0 anyway, so they go.
+const bare = (p) => digits(p).replace(/^0+/, "");
 // 10 digits -> 91XXXXXXXXXX, which is how every other table here stores a number.
-const canon = (p) => { const d = digits(p); return d.length === 10 ? "91" + d : d; };
-const valid = (p) => { const d = digits(p); return d.length === 10 || (d.length === 12 && d.startsWith("91")); };
+const canon = (p) => { const d = bare(p); return d.length === 10 ? "91" + d : d; };
+const valid = (p) => { const d = bare(p); return d.length === 10 || (d.length === 12 && d.startsWith("91")); };
 
 // Parse an uploaded sheet. First column = phone; a header row is detected and kept as labels.
 export function parseSheet(base64) {
@@ -203,4 +207,17 @@ export async function exportSheet() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Campaign");
   return XLSX.write(wb, { type: "base64", bookType: "xlsx" });
+}
+
+// One number typed six different ways must reach one chat — a duplicate here means a second
+// opener to someone already talking to us. Run `node portal/waCampaign.js` after touching canon.
+if (import.meta.url === (await import("url")).pathToFileURL(process.argv[1] || "").href) {
+  const assert = (await import("assert")).strict;
+  for (const p of [9408386083, "9408386083", "94083 86083", "+919408386083", "+91 94083 86083",
+                   "919408386083", 919408386083, "91-9408386083", "09408386083", "0091 9408386083"]) {
+    assert.equal(valid(p), true, String(p));
+    assert.equal(canon(p), "919408386083", String(p));
+  }
+  for (const p of ["", "abc", "94083", "9408386083123", "1234567890123"]) assert.equal(valid(p), false, String(p));
+  console.log("waCampaign ok");
 }
