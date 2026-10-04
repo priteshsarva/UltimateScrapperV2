@@ -18,6 +18,7 @@ const SAMPLE_ITEMS = [
 export const EMAIL_TYPES = [
   ["placed", "Order received (customer)"],
   ["processing", "Order processing (customer)"],
+  ["shipped", "Order shipped + tracking (customer)"],
   ["completed", "Order completed (customer)"],
   ["on-hold", "Order on hold (customer)"],
   ["cancelled", "Order cancelled (customer)"],
@@ -28,6 +29,8 @@ export const EMAIL_TYPES = [
   ["payout_cancelled", "Payout cancelled (vendor)"],
 ];
 
+const SAMPLE_TRACKING = { courier: "Delhivery", tracking_no: "SPP1234567890", tracking_url: "https://www.delhivery.com/track/package/SPP1234567890" };
+
 const SAMPLE_CONTACT = { name: "AB Store", email: "hello@abstore.example", phone: "+91 90000 00303", whatsapp: "+91 90000 00303", address: { line1: "Shop 4, Vesu Main Rd", city: "Surat", state: "Gujarat", pincode: "394010" } };
 
 export function renderSampleEmail(type) {
@@ -37,5 +40,5 @@ export function renderSampleEmail(type) {
     return buildPayoutEmail(kind, { brand: BRAND, amount: 5400, utr: "AXIS123456789", note: "Bank details mismatch" });
   }
   const order = type === "placed" ? { ...SAMPLE_ORDER, payment_status: "unpaid" } : SAMPLE_ORDER;
-  return buildCustomerOrderEmail(type, { brand: "AB Store", order, items: SAMPLE_ITEMS, contact: SAMPLE_CONTACT });
+  return buildCustomerOrderEmail(type, { brand: "AB Store", order, items: SAMPLE_ITEMS, contact: SAMPLE_CONTACT, tracking: type === "shipped" ? SAMPLE_TRACKING : null });
 }

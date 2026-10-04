@@ -69,6 +69,7 @@ import { wholesaleProductClientRoutes, wholesaleProductAdminRoutes } from "./por
 import uploadRoutes from "./portal/uploadRoutes.js";
 import { walletClientRoutes, walletAdminRoutes } from "./portal/walletRoutes.js";
 import { fulfilmentClientRoutes, fulfilmentAdminRoutes } from "./portal/fulfilmentRoutes.js";
+import { selloshipClientRoutes } from "./portal/selloshipRoutes.js";
 import { waInternalRoutes, waAdminRoutes } from "./portal/waRoutes.js";
 
 
@@ -239,6 +240,7 @@ app.use("/portal", walletClientRoutes);                  // vendor: /portal/wall
 app.use("/portal/admin", walletAdminRoutes);             // admin: /portal/admin/payouts
 app.use("/portal", fulfilmentClientRoutes);              // vendor: verify-payment, shipments
 app.use("/portal/admin", fulfilmentAdminRoutes);         // admin: verify-payment, shipments approve/release
+app.use("/portal", selloshipClientRoutes);                // vendor: Selloship connect + order push
 
 startScheduler();
 sweepTmp();                         // clean leftovers from the last run on boot

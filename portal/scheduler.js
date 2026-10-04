@@ -11,6 +11,8 @@ import { notify } from "./notifications.js";
 import { reverifyListingsTick, purgeShipmentPhotosTick } from "./wholesaleCron.js";
 import { runCatalogueScan } from "./catalogueScan.js";
 import { purgeStorefrontImagesTick } from "./storefrontImageCron.js";
+import { selloshipTrackTick } from "./selloship.js";
+import { notifyBuyerShipped } from "./fulfilmentRoutes.js";
 
 // Hosted storefronts get a 5-day grace after their plan expires: the store stays
 // live, but the owner is emailed (up to 3×/day) and gets an in-portal notification.
@@ -131,6 +133,9 @@ export async function unpaidOrderReminderTick() {
        left join site_settings s on s.enrollment_id = e.id
       where e.type = 'hosted' and e.status = 'active'
         and coalesce(o.payment_status, 'unpaid') = 'unpaid'
+        -- only nag when something is actually payable online (prepaid/semicod advance);
+        -- a pure-COD order collects at delivery, so no "finish paying" email.
+        and coalesce(o.online_amount, o.total) > 0
         and o.status <> 'cancelled'
         and o.buyer_email is not null
         and o.created_at >= now() - interval '7 days'
@@ -185,11 +190,16 @@ export function startScheduler() {
       cron.default.schedule("0 10 * * *", () => {
         unpaidOrderReminderTick().then((r) => console.log("[unpaid-order] tick", r)).catch((e) => console.error("[unpaid-order] tick:", e.message));
       });
+      // Selloship: pull tracking for parcels that now have a courier assigned.
+      // Hourly — a buyer asking "where is my order" shouldn't wait a day for the AWB.
+      cron.default.schedule("20 * * * *", () => {
+        selloshipTrackTick({ onTracking: notifyBuyerShipped }).then((r) => console.log("[selloship] track", r)).catch((e) => console.error("[selloship] track:", e.message));
+      });
       // reclaim orphaned storefront images (uploaded but never linked) after 30 days
       cron.default.schedule("45 3 * * *", () => {
         purgeStorefrontImagesTick().then((r) => console.log("[storefront-img] purge", r)).catch((e) => console.error("[storefront-img] purge:", e.message));
       });
-      console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30; wholesale maintenance at 08:15");
+      console.log("[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30; wholesale maintenance at 08:15; Selloship tracking hourly");
     })
     .catch(() => console.warn("[billing] node-cron not installed — trigger billingTick via the admin endpoint or system cron"));
 }

@@ -440,8 +440,8 @@ clientRouter.get("/hosted-sites/:id/settings", asyncH(async (req, res) => {
 }));
 
 const SETTINGS_FIELDS = ["store_name", "logo_url", "favicon_url", "theme", "whatsapp", "upi_id", "upi_name", "payment_position", "email", "phone",
-  "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics", "nav", "reviews", "preset"];
-const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics", "nav", "reviews"]);
+  "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics", "nav", "reviews", "preset", "checkout"];
+const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics", "nav", "reviews", "checkout"]);
 
 clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
@@ -646,7 +646,8 @@ clientRouter.get("/hosted-sites/:id/orders", asyncH(async (req, res) => {
 clientRouter.get("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const order = (await query(
-    `select o.*, e.payout_mode from orders o join enrollments e on e.id=o.enrollment_id where o.id=$1 and o.enrollment_id=$2`,
+    `select o.*, e.payout_mode, (e.selloship_connected_at is not null) as selloship_connected
+       from orders o join enrollments e on e.id=o.enrollment_id where o.id=$1 and o.enrollment_id=$2`,
     [req.params.orderId, req.params.id]
   )).rows[0];
   if (!order) return res.status(404).json({ error: "Order not found" });
@@ -658,7 +659,7 @@ clientRouter.get("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) =>
     page_url: slug ? productPageUrl({ slug }, it.db_name, it.product_id) : null,
     product_url: srcUrls[`${it.db_name}:${it.product_id}`] || null, // original supplier URL
   }));
-  const shipments = (await query(`select id, leg, courier, tracking_no, photos, status, created_at, reviewed_at from shipments where order_id=$1 order by created_at`, [order.id])).rows;
+  const shipments = (await query(`select id, leg, courier, tracking_no, tracking_url, photos, status, created_at, reviewed_at, buyer_notified_at from shipments where order_id=$1 order by created_at`, [order.id])).rows;
   res.json({ order, items, shipments });
 }));
 
@@ -858,7 +859,7 @@ adminRouter.get("/orders/:id", asyncH(async (req, res) => {
     page_url: slug ? productPageUrl({ slug }, it.db_name, it.product_id) : null,
     product_url: srcUrls[`${it.db_name}:${it.product_id}`] || null,
   }));
-  const shipments = (await query(`select id, leg, courier, tracking_no, photos, status, created_at, reviewed_at from shipments where order_id=$1 order by created_at`, [order.id])).rows;
+  const shipments = (await query(`select id, leg, courier, tracking_no, tracking_url, photos, status, created_at, reviewed_at, buyer_notified_at from shipments where order_id=$1 order by created_at`, [order.id])).rows;
   res.json({ order, items, shipments });
 }));
 

@@ -24,6 +24,7 @@ import { getPlatformUpi, getActiveProvider } from "./settings.js";
 import { notify as notifyFeed } from "./notifications.js";
 import { createOrder as pay0CreateOrder, checkStatus as pay0CheckStatus } from "./pay0.js";
 import { verifyOrderPayment } from "./orderVerify.js";
+import { computeCheckout, resolveMethod, enabledMethods } from "./checkoutMath.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FOLDER = path.resolve(__dirname, "../databases");
@@ -393,6 +394,16 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
     upi_name: site.upi_name || null,
     payment_position: site.payment_position || "after", // 'after' | 'before' address
     payment, // { mode, upi_id, upi_name, whatsapp } — which UPI the buyer pays
+    // Checkout methods (prepaid / cod / semicod) the vendor enabled, + fee/advance
+    // config, so the storefront can show the chooser and price each option.
+    checkout: {
+      methods: enabledMethods(site.checkout || {}),
+      default: resolveMethod(null, site.checkout || {}),
+      cod_fee: Number((site.checkout || {}).cod_fee) || 0,
+      prepaid_discount: Number((site.checkout || {}).prepaid_discount) || 0,
+      advance_type: (site.checkout || {}).advance_type === "fixed" ? "fixed" : "percent",
+      advance_value: Number((site.checkout || {}).advance_value) || 0,
+    },
 
     email: site.email || null,
     phone: site.phone || null,
@@ -1098,6 +1109,10 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
   if (!lineItems.length) return res.status(400).json({ error: "No valid items to order" });
 
   const subtotal = round2(lineItems.reduce((s, li) => s + li.line_total, 0));
+  // Payment method (prepaid / cod / semicod) + the money split, from the vendor's
+  // checkout config. resolveMethod guards against a disabled or unknown method.
+  const checkoutCfg = site.checkout || {};
+  const pay = computeCheckout(subtotal, resolveMethod(req.body?.payment_method, checkoutCfg), checkoutCfg);
 
   const client = await pool.connect();
   try {
@@ -1135,11 +1150,13 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
     }
 
     const order = (await client.query(
-      `insert into orders (enrollment_id, customer_id, buyer_name, buyer_phone, buyer_email, address, subtotal, total, note, fulfilment_mode)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9, coalesce((select fulfilment_mode from enrollments where id=$1),'via_retailer'))
+      `insert into orders (enrollment_id, customer_id, buyer_name, buyer_phone, buyer_email, address, subtotal, total, note,
+                           payment_method, online_amount, cod_due, cod_fee, prepaid_discount, fulfilment_mode)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, coalesce((select fulfilment_mode from enrollments where id=$1),'via_retailer'))
        returning id, order_no`,
       [enr.id, customerId, name, phone, email,
-       JSON.stringify(shipTo), subtotal, subtotal, note || null]
+       JSON.stringify(shipTo), subtotal, pay.total, note || null,
+       pay.method, pay.online_amount, pay.cod_due, pay.cod_fee, pay.prepaid_discount]
     )).rows[0];
 
     for (const li of lineItems) {
@@ -1170,13 +1187,14 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
       } catch (e) { console.error("[order] save address book failed:", e.message); }
     }
 
-    const wa_url = buildWhatsAppUrl(site.whatsapp, order.order_no, lineItems, subtotal, { ...shipTo, phone }, site.store_name || enr.slug);
+    const wa_url = buildWhatsAppUrl(site.whatsapp, order.order_no, lineItems, pay.total, { ...shipTo, phone }, site.store_name || enr.slug);
 
     // Fire-and-forget order emails (WooCommerce-style). Never break checkout.
     const storeName = site.store_name || enr.slug;
     const storeContact = { name: storeName, email: site.email, phone: site.phone, whatsapp: site.whatsapp, address: site.address };
     const emailOrder = {
-      order_no: order.order_no, total: subtotal, subtotal,
+      order_no: order.order_no, total: pay.total, subtotal,
+      payment_method: pay.method, online_amount: pay.online_amount, cod_due: pay.cod_due,
       address: { ...shipTo, phone }, buyer_name: name, buyer_phone: phone, buyer_email: email,
       payment_status: "unpaid",
     };
@@ -1198,7 +1216,12 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
     // so the buyer is logged in right after checkout. account_exists tells the
     // storefront to invite them to log in to their existing (password) account.
     const loginCustomer = loginToken ? { id: customerId, email: cleanEmail, name, phone } : null;
-    res.json({ order_no: order.order_no, total: subtotal, wa_url, token: loginToken, customer: loginCustomer, account_exists: accountExists });
+    res.json({
+      order_no: order.order_no, total: pay.total,
+      payment_method: pay.method, online_amount: pay.online_amount, cod_due: pay.cod_due,
+      cod_fee: pay.cod_fee, prepaid_discount: pay.prepaid_discount,
+      wa_url, token: loginToken, customer: loginCustomer, account_exists: accountExists,
+    });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
@@ -1244,14 +1267,17 @@ async function gatewayCredsFor(enrId) {
 router.post("/:slug/orders/:orderNo/pay-start", resolveStore, asyncH(async (req, res) => {
   const enr = req.storeEnrollment;
   const o = (await query(
-    `select id, order_no, total, buyer_phone, payment_status from orders where enrollment_id=$1 and order_no=$2`,
+    `select id, order_no, total, online_amount, payment_method, buyer_phone, payment_status from orders where enrollment_id=$1 and order_no=$2`,
     [enr.id, req.params.orderNo]
   )).rows[0];
   if (!o) return res.status(404).json({ error: "Order not found" });
   if (["claimed", "verified"].includes(o.payment_status)) return res.status(400).json({ error: "This order is already paid." });
+  // prepaid/semicod pay their online slice; a pure-COD order has nothing to collect online.
+  const amount = Number(o.online_amount != null ? o.online_amount : o.total);
+  if (!(amount > 0)) return res.status(400).json({ error: "This is a cash-on-delivery order — nothing to pay online." });
   const SELF = (process.env.SELF_URL || process.env.SERVER_URL || `https://${req.get("host")}`).replace(/\/+$/, "");
   const r = await pay0CreateOrder({
-    amount: Number(o.total), orderId: `SO-${o.id}`, customerMobile: o.buyer_phone || "",
+    amount, orderId: `SO-${o.id}`, customerMobile: o.buyer_phone || "",
     redirectUrl: `${SELF}/store/pay0/callback?order=${o.id}`, remark: `${enr.slug} ${o.order_no}`,
     creds: await gatewayCredsFor(enr.id),
   });
@@ -1274,7 +1300,7 @@ router.get("/:slug/orders/:orderNo/pay-verify", resolveStore, asyncH(async (req,
 
 router.get("/:slug/me/orders", resolveStore, identifyCustomer, requireCustomer, asyncH(async (req, res) => {
   const { rows } = await query(
-    `select id, order_no, status, payment_status, subtotal, total, created_at from orders
+    `select id, order_no, status, payment_status, subtotal, total, payment_method, online_amount, cod_due, created_at from orders
       where enrollment_id=$1 and customer_id=$2 order by created_at desc`,
     [req.storeEnrollment.id, req.customer.sub]
   );
@@ -1288,7 +1314,16 @@ router.get("/:slug/me/orders/:orderNo", resolveStore, identifyCustomer, requireC
   )).rows[0];
   if (!order) return res.status(404).json({ error: "Order not found" });
   const items = (await query(`select * from order_items where order_id=$1`, [order.id])).rows;
-  res.json({ order, items });
+  // Only the leg that ends at the buyer, and never the parcel photos — those are
+  // internal payout proof. A rejected proof isn't a shipment the buyer should see.
+  const shipments = (await query(
+    `select courier, tracking_no, tracking_url, created_at from shipments
+      where order_id=$1 and leg in ('retailer_to_customer','wholesaler_to_customer')
+        and status <> 'rejected' and (tracking_no is not null or tracking_url is not null)
+      order by created_at`,
+    [order.id]
+  )).rows;
+  res.json({ order, items, shipments });
 }));
 
 // Pay0 redirects the buyer here after payment; verify + bounce to the store.

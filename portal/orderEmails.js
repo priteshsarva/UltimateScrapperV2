@@ -10,6 +10,22 @@ const itemsFor = (items = []) => items.map((it) => ({
   unit_price: it.unit_price, line_total: it.line_total,
 }));
 
+// Courier + tracking number (+ "Track parcel" link) for the shipped email.
+function trackingBlock(tracking) {
+  if (!tracking) return "";
+  const rows = [
+    tracking.courier ? ["Courier", tracking.courier] : null,
+    tracking.tracking_no ? ["Tracking number", tracking.tracking_no] : null,
+  ].filter(Boolean)
+    .map(([k, v]) => `<tr><td style="padding:6px 0;font-size:13px;color:#6b6b6b;">${k}</td><td style="padding:6px 0;font-size:13px;color:#2b2b2b;text-align:right;font-weight:600;">${v}</td></tr>`)
+    .join("");
+  if (!rows && !tracking.tracking_url) return "";
+  return `<div style="margin-top:20px;">
+      ${rows ? `<table role="presentation" width="100%" style="border:1px solid #e4e4e7;border-radius:6px;"><tbody>${rows}</tbody></table>` : ""}
+      ${tracking.tracking_url ? button("Track parcel", tracking.tracking_url) : ""}
+    </div>`;
+}
+
 function orderBody(order, items, { extra = "" } = {}) {
   const totals = [
     ["Subtotal", money(order.subtotal ?? order.total)],
@@ -25,15 +41,16 @@ function orderBody(order, items, { extra = "" } = {}) {
 const CUSTOMER_COPY = {
   placed: (no) => ["Order received", `Order ${no} received`, "Thanks for your order! We've received it and will confirm your payment shortly."],
   processing: (no) => ["Your order is being processed", `Order ${no} is being processed`, "Your payment is confirmed and your order is now being prepared."],
+  shipped: (no) => ["Your order has shipped", `Order ${no} has shipped`, "Your order is on its way. Use the tracking details below to follow your parcel."],
   completed: (no) => ["Your order is complete", `Order ${no} is complete`, "Your order is complete. Thanks for shopping with us!"],
   "on-hold": (no) => ["Your order is on hold", `Order ${no} is on hold`, "Your order is on hold. We'll be in touch shortly."],
   cancelled: (no) => ["Your order was cancelled", `Order ${no} was cancelled`, "Your order has been cancelled. If this is unexpected, please reach out."],
   refunded: (no) => ["Your order was refunded", `Order ${no} was refunded`, "Your order has been refunded."],
 };
 
-export function buildCustomerOrderEmail(kind, { brand, order, items, contact = null }) {
+export function buildCustomerOrderEmail(kind, { brand, order, items, contact = null, tracking = null }) {
   const [subjectBase, title, intro] = (CUSTOMER_COPY[kind] || CUSTOMER_COPY.placed)(order.order_no);
-  return { subject: `${subjectBase} — ${order.order_no}`, html: wrap({ title, brand, intro, bodyHtml: orderBody(order, items), contact }) };
+  return { subject: `${subjectBase} — ${order.order_no}`, html: wrap({ title, brand, intro, bodyHtml: orderBody(order, items, { extra: trackingBlock(tracking) }), contact }) };
 }
 
 export function buildVendorOrderEmail({ brand, order, items, storeName, contact = null }) {
@@ -65,9 +82,9 @@ export function buildPayoutEmail(kind, { brand, amount, utr, note }) {
 }
 
 // ---- senders (fire-and-forget) ----
-export function sendCustomerOrderEmail({ to, brand, order, items, kind, contact }) {
+export function sendCustomerOrderEmail({ to, brand, order, items, kind, contact, tracking = null }) {
   if (!to) return;
-  const { subject, html } = buildCustomerOrderEmail(kind, { brand, order, items, contact });
+  const { subject, html } = buildCustomerOrderEmail(kind, { brand, order, items, contact, tracking });
   sendMail({ to, subject, html, reason: `order:${kind}`, name: order.buyer_name, mobile: order.buyer_phone }).catch((e) => console.error("[orderEmail]", e.message));
 }
 export function sendVendorOrderEmail({ to, brand, order, items, storeName, contact }) {

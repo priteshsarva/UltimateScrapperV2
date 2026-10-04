@@ -13,6 +13,7 @@ import { requireAuth, requireAdmin } from "./auth.js";
 import { withLedger } from "./wallet.js";
 import { verifyOrderPayment, refundOrder } from "./orderVerify.js";
 import { notify } from "./notifications.js";
+import { sendCustomerOrderEmail } from "./orderEmails.js";
 
 const asyncH = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => {
   console.error("[fulfilment]", e.message);
@@ -37,6 +38,56 @@ async function releaseOutstanding(orderId, userIds) {
   }));
   if (entries.length) await withLedger(entries);
   return entries;
+}
+
+// The legs the buyer is party to. wholesaler_to_retailer is internal.
+const CUSTOMER_LEGS = ["retailer_to_customer", "wholesaler_to_customer"];
+
+// Money still held on the order across all parties (hold - released/refunded).
+async function outstandingHold(orderId) {
+  const { rows } = await query(
+    `select coalesce(sum(amount) filter (where type='hold'),0)
+          - coalesce(sum(amount) filter (where type in ('release','refund')),0) as held
+       from wallet_ledger where order_id=$1`, [orderId]
+  );
+  return round2(rows[0]?.held || 0);
+}
+
+// Parcel photos exist to protect money the platform is HOLDING — the admin looks
+// at them before releasing each party's share. When nothing is held (direct
+// payout, or everything already released), a courier + tracking number is the
+// dispatch record and photos are pure friction: a vendor shipping through JD
+// Web & Ship or Selloship has an AWB, not a photo of the parcel.
+export function shipmentProofOk({ photoCount = 0, trackingNo = "", heldAmount = 0 }) {
+  if (photoCount > 10) return { ok: false, error: "Up to 10 photos." };
+  const hasTracking = String(trackingNo || "").trim() !== "";
+  if (Number(heldAmount) > 0) {
+    return photoCount >= 2 ? { ok: true }
+      : { ok: false, error: "At least 2 parcel photos are required while the payment is held." };
+  }
+  if (photoCount >= 2 || hasTracking) return { ok: true };
+  return { ok: false, error: "Add a tracking number, or 2 parcel photos." };
+}
+
+// Tell the buyer their parcel is on its way — once per shipment, the first time
+// it carries a tracking number. Fire-and-forget: mail must never fail a request.
+export async function notifyBuyerShipped(shipmentId) {
+  try {
+    const s = (await query(`select * from shipments where id=$1`, [shipmentId])).rows[0];
+    if (!s || s.buyer_notified_at) return;
+    if (!CUSTOMER_LEGS.includes(s.leg)) return;        // internal leg — not the buyer's business
+    if (!s.tracking_no && !s.tracking_url) return;
+    const order = (await query(`select * from orders where id=$1`, [s.order_id])).rows[0];
+    if (!order?.buyer_email) return;
+    const items = (await query(`select product_name, size, qty, unit_price, line_total from order_items where order_id=$1`, [s.order_id])).rows;
+    const ss = (await query(`select store_name, email, phone, whatsapp, address from site_settings where enrollment_id=$1`, [order.enrollment_id])).rows[0] || {};
+    sendCustomerOrderEmail({
+      to: order.buyer_email, brand: ss.store_name, order, items, kind: "shipped",
+      contact: { name: ss.store_name, email: ss.email, phone: ss.phone, whatsapp: ss.whatsapp, address: ss.address },
+      tracking: { courier: s.courier, tracking_no: s.tracking_no, tracking_url: s.tracking_url },
+    });
+    await query(`update shipments set buyer_notified_at=now() where id=$1`, [s.id]);
+  } catch (e) { console.error("[shipped email]", e.message); }
 }
 
 // user_ids of the wholesale suppliers on an order
@@ -109,25 +160,52 @@ clientRouter.put("/hosted-sites/:id/payout-mode", asyncH(async (req, res) => {
   res.json({ ok: true, payout_mode: mode });
 }));
 
-// Submit a shipment leg with parcel photos (2..10).
+// Submit a shipment leg: parcel photos (2..10) and/or a courier tracking number.
+// See shipmentProofOk — photos are mandatory only while money is held.
 clientRouter.post("/shipments", asyncH(async (req, res) => {
-  const { order_id, leg, courier, tracking_no, photos } = req.body || {};
+  const { order_id, leg, courier, tracking_no, tracking_url, photos } = req.body || {};
   if (!order_id || !["wholesaler_to_retailer", "retailer_to_customer", "wholesaler_to_customer"].includes(leg)) return res.status(400).json({ error: "order_id and a valid leg are required" });
   const pics = Array.isArray(photos) ? photos.filter((p) => p && p.url) : [];
-  if (pics.length < 2) return res.status(400).json({ error: "At least 2 parcel photos are required." });
-  if (pics.length > 10) return res.status(400).json({ error: "Up to 10 photos." });
 
   const order = (await query(`select * from orders where id=$1`, [order_id])).rows[0];
   if (!order) return res.status(404).json({ error: "Order not found" });
   if (!(await canSubmitLeg(req.user.sub, order, leg))) return res.status(403).json({ error: "You're not a party to this shipment." });
 
+  const proof = shipmentProofOk({ photoCount: pics.length, trackingNo: tracking_no, heldAmount: await outstandingHold(order_id) });
+  if (!proof.ok) return res.status(400).json({ error: proof.error });
+
   const purgeAfter = new Date(Date.now() + PURGE_DAYS * 86400 * 1000);
   const r = (await query(
-    `insert into shipments (order_id, leg, shipped_by, courier, tracking_no, photos, status, purge_after)
-     values ($1,$2,$3,$4,$5,$6,'submitted',$7) returning *`,
-    [order_id, leg, req.user.sub, courier || null, tracking_no || null, JSON.stringify(pics), purgeAfter]
+    `insert into shipments (order_id, leg, shipped_by, courier, tracking_no, tracking_url, photos, status, purge_after)
+     values ($1,$2,$3,$4,$5,$6,$7,'submitted',$8) returning *`,
+    [order_id, leg, req.user.sub, courier || null, tracking_no || null, tracking_url || null, JSON.stringify(pics), purgeAfter]
   )).rows[0];
+  notifyBuyerShipped(r.id);
   res.json({ shipment: r });
+}));
+
+// Add or correct the courier details on a shipment you submitted. Couriers hand
+// over the AWB after pickup, so this normally runs a few hours after the submit.
+clientRouter.patch("/shipments/:id", asyncH(async (req, res) => {
+  const { courier, tracking_no, tracking_url } = req.body || {};
+  const s = (await query(`select * from shipments where id=$1`, [req.params.id])).rows[0];
+  if (!s) return res.status(404).json({ error: "Shipment not found" });
+  const order = (await query(`select * from orders where id=$1`, [s.order_id])).rows[0];
+  // The submitter, or anyone who could have submitted this leg (e.g. a second
+  // staff login on the same store), may fill in the tracking.
+  if (s.shipped_by !== req.user.sub && !(order && await canSubmitLeg(req.user.sub, order, s.leg))) {
+    return res.status(403).json({ error: "You're not a party to this shipment." });
+  }
+  const sets = [], params = [];
+  for (const [col, val] of [["courier", courier], ["tracking_no", tracking_no], ["tracking_url", tracking_url]]) {
+    if (val === undefined) continue;
+    params.push(String(val).trim() || null); sets.push(`${col}=$${params.length}`);
+  }
+  if (!sets.length) return res.status(400).json({ error: "nothing to update" });
+  params.push(s.id);
+  const row = (await query(`update shipments set ${sets.join(", ")} where id=$${params.length} returning *`, params)).rows[0];
+  notifyBuyerShipped(row.id);
+  res.json({ shipment: row });
 }));
 
 // Shipments the current user is a party to (as supplier or store owner).
@@ -224,11 +302,13 @@ adminRouter.post("/orders/:id/mark-shipped", asyncH(async (req, res) => {
   if (!order) return res.status(404).json({ error: "Order not found" });
   if (order.payment_status !== "verified") return res.status(409).json({ error: "Verify the payment first." });
   const leg = order.fulfilment_mode === "direct_to_customer" ? "wholesaler_to_customer" : "retailer_to_customer";
-  await query(
-    `insert into shipments (order_id, leg, shipped_by, photos, status, reviewed_by, reviewed_at, note, purge_after)
-     values ($1,$2,$3,'[]','approved',$3,now(),'Marked shipped by admin',$4)`,
-    [order.id, leg, req.user.sub, new Date(Date.now() + PURGE_DAYS * 86400 * 1000)]
-  );
+  const { courier, tracking_no, tracking_url } = req.body || {};
+  const ship = (await query(
+    `insert into shipments (order_id, leg, shipped_by, courier, tracking_no, tracking_url, photos, status, reviewed_by, reviewed_at, note, purge_after)
+     values ($1,$2,$3,$4,$5,$6,'[]','approved',$3,now(),'Marked shipped by admin',$7) returning id`,
+    [order.id, leg, req.user.sub, courier || null, tracking_no || null, tracking_url || null, new Date(Date.now() + PURGE_DAYS * 86400 * 1000)]
+  )).rows[0];
+  notifyBuyerShipped(ship.id);
   // release every outstanding hold on the order (both wholesaler + retailer)
   const storeOwner = (await query(`select user_id from enrollments where id=$1`, [order.enrollment_id])).rows.map((r) => r.user_id);
   const suppliers = await supplierUserIds(order.id);
