@@ -20,6 +20,19 @@ export function signCustomerToken(customer) {
   );
 }
 
+// Unlocks ONE order's public read-only view (the "view your order" link in the
+// buyer's payment WhatsApp). Bound to the order id, so the sequential order
+// number alone can't be used to enumerate other buyers' orders.
+export function signOrderToken(orderId) {
+  return jwt.sign({ order: String(orderId) }, CUSTOMER_JWT_SECRET, { expiresIn: "60d" });
+}
+export function verifyOrderToken(token, orderId) {
+  try {
+    const p = jwt.verify(String(token || ""), CUSTOMER_JWT_SECRET);
+    return String(p.order) === String(orderId);
+  } catch { return false; }
+}
+
 // Preview unlock token — proves the holder entered the store's preview password,
 // so a not-yet-live store can be viewed. Scoped to one enrollment.
 export function signPreviewToken(enrollmentId) {

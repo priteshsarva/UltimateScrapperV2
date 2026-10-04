@@ -10,6 +10,7 @@ import { getPlatformConfig } from "./settings.js";
 import { withLedger } from "./wallet.js";
 import { wholesaleDb, wsRun, wsGet } from "./wholesaleDb.js";
 import { sendCustomerOrderEmail } from "./orderEmails.js";
+import { notify } from "./notifications.js";
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -19,7 +20,10 @@ export async function verifyOrderPayment(orderId, { utr = null } = {}) {
   if (order.payment_status === "verified") return { ok: true, already: true };
 
   const items = (await query(`select * from order_items where order_id=$1`, [orderId])).rows;
-  const store = (await query(`select id, user_id, payout_mode, gateway_fee_pct from enrollments where id=$1`, [order.enrollment_id])).rows[0];
+  const store = (await query(
+    `select id, user_id, payout_mode, gateway_fee_pct, selloship_vendor_id, selloship_auto_push
+       from enrollments where id=$1`, [order.enrollment_id]
+  )).rows[0];
   const cfg = await getPlatformConfig();
   const total = Number(order.total);
 
@@ -73,7 +77,40 @@ export async function verifyOrderPayment(orderId, { utr = null } = {}) {
   const contact = { name: ss.store_name, email: ss.email, phone: ss.phone, whatsapp: ss.whatsapp, address: ss.address };
   sendCustomerOrderEmail({ to: order.buyer_email, brand: ss.store_name, order: { ...order, payment_status: "verified", status: "processing" }, items, kind: "processing", contact });
 
+  // Auto-book the parcels with the store's courier, if the vendor turned that on.
+  // This is the point WooCommerce would call the order 'processing', which is where
+  // JD's and Selloship's own plugins hook their auto-sync.
+  //
+  // Fire-and-forget on purpose: a courier outage must never fail a confirmed
+  // payment. But a silent failure would mean an order that never ships, so the
+  // vendor is notified on anything less than a clean booking.
+  if (store.selloship_auto_push && store.selloship_vendor_id) {
+    autoBookWithSelloship(order, store.user_id);
+  }
+
   return { ok: true, split: { wholesalerTotal, retailerShare, platformFee, gatewayFee, held: store.payout_mode === "platform" } };
+}
+
+// Book an auto-push order's parcels, and tell the vendor if anything didn't land.
+// Never throws — the caller is a payment path.
+async function autoBookWithSelloship(order, ownerUserId) {
+  try {
+    const { pushOrderToSelloship } = await import("./selloship.js");
+    const r = await pushOrderToSelloship(order.id);
+    console.log("[selloship] auto-push", order.order_no, r);
+    if (r.failed?.length) {
+      await notify({
+        user_id: ownerUserId, type: "system",
+        title: `Selloship booked ${r.booked.length} of ${r.booked.length + r.failed.length} parcels for ${order.order_no}. Book the rest from the order page.`,
+      });
+    }
+  } catch (e) {
+    console.error("[selloship] auto-push", order.order_no, e.message);
+    notify({
+      user_id: ownerUserId, type: "system",
+      title: `Couldn't book ${order.order_no} with Selloship: ${e.message} — book it manually from the order page.`,
+    }).catch(() => {});
+  }
 }
 
 // Refund/cancel a verified order: release holds back out (refund) and (optionally)

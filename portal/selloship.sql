@@ -16,6 +16,12 @@ alter table enrollments add column if not exists selloship_store_name  text;
 alter table enrollments add column if not exists selloship_flags       jsonb;
 alter table enrollments add column if not exists selloship_connected_at timestamptz;
 
+-- Book parcels automatically the moment a payment is verified (the same point
+-- WooCommerce would call the order 'processing'). Off by default: booking a parcel
+-- spends the vendor's money and dispatches a real courier, so it is opt-in.
+-- Manual booking from the order page stays available either way.
+alter table enrollments add column if not exists selloship_auto_push boolean not null default false;
+
 -- The aggregator's own order reference for a shipment, used to poll tracking.
 -- Selloship books ONE order per line item, so an order can hold several of these,
 -- one shipments row each.

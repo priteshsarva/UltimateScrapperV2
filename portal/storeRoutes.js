@@ -13,7 +13,7 @@ import { query, pool } from "./db.js";
 import { resolveStore } from "./resolveStore.js";
 import {
   hashPassword, comparePassword, signCustomerToken, identifyCustomer, requireCustomer,
-  signPreviewToken,
+  signPreviewToken, signOrderToken, verifyOrderToken,
 } from "./customerAuth.js";
 import { priceProduct, priceSqlExpr } from "./pricing.js";
 import { sendOrderConfirmationEmail, sendOrderNotificationEmail } from "./mailer.js";
@@ -1220,6 +1220,7 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
       order_no: order.order_no, total: pay.total,
       payment_method: pay.method, online_amount: pay.online_amount, cod_due: pay.cod_due,
       cod_fee: pay.cod_fee, prepaid_discount: pay.prepaid_discount,
+      order_token: signOrderToken(order.id), // unlocks the public order-view link
       wa_url, token: loginToken, customer: loginCustomer, account_exists: accountExists,
     });
   } catch (err) {
@@ -1296,6 +1297,27 @@ router.get("/:slug/orders/:orderNo/pay-verify", resolveStore, asyncH(async (req,
   const st = await pay0CheckStatus(o.gateway_order_id, await gatewayCredsFor(enr.id));
   if (st.paid) { await verifyOrderPayment(o.id, { utr: st.utr }); return res.json({ paid: true }); }
   res.json({ paid: false });
+}));
+
+// Public read-only order view — the "view your order" link in the buyer's
+// payment WhatsApp. No login: the ?t= token (signed, bound to the order id)
+// gates it so sequential order numbers can't be enumerated. Never returns
+// supplier cost or source URLs — only buyer-facing fields.
+router.get("/:slug/o/:orderNo", resolveStore, asyncH(async (req, res) => {
+  const enr = req.storeEnrollment;
+  const o = (await query(
+    `select id, order_no, status, payment_status, created_at, buyer_name, buyer_phone,
+            address, subtotal, total, payment_method, online_amount, cod_due, cod_fee, prepaid_discount
+       from orders where enrollment_id=$1 and order_no=$2`,
+    [enr.id, req.params.orderNo]
+  )).rows[0];
+  if (!o || !verifyOrderToken(req.query.t, o.id)) return res.status(404).json({ error: "Order not found" });
+  const rawItems = (await query(
+    `select product_id, db_name, product_name, size, image_url, unit_price, qty, line_total
+       from order_items where order_id=$1`, [o.id]
+  )).rows;
+  const items = rawItems.map((it) => ({ ...it, page_url: productPageUrl(enr, it.db_name, it.product_id) }));
+  res.json({ order: o, items });
 }));
 
 router.get("/:slug/me/orders", resolveStore, identifyCustomer, requireCustomer, asyncH(async (req, res) => {

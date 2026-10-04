@@ -26,7 +26,7 @@ const ownsSite = async (siteId, userId) =>
 clientRouter.get("/hosted-sites/:id/selloship", asyncH(async (req, res) => {
   if (!(await ownsSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const r = (await query(
-    `select selloship_email, selloship_store_name, selloship_flags, selloship_connected_at
+    `select selloship_email, selloship_store_name, selloship_flags, selloship_connected_at, selloship_auto_push
        from enrollments where id=$1`, [req.params.id]
   )).rows[0] || {};
   res.json({
@@ -35,7 +35,21 @@ clientRouter.get("/hosted-sites/:id/selloship", asyncH(async (req, res) => {
     store_name: r.selloship_store_name || null,
     flags: r.selloship_flags || null,
     connected_at: r.selloship_connected_at || null,
+    auto_push: !!r.selloship_auto_push,
   });
+}));
+
+// Automatic (book the moment a payment is verified) vs manual (the button on the
+// order). Manual always works; this only decides whether we also do it for them.
+clientRouter.put("/hosted-sites/:id/selloship/auto-push", asyncH(async (req, res) => {
+  if (!(await ownsSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const on = req.body?.auto_push === true;
+  const r = (await query(
+    `update enrollments set selloship_auto_push=$1 where id=$2 and selloship_vendor_id is not null
+     returning selloship_auto_push`, [on, req.params.id]
+  )).rows[0];
+  if (!r) return res.status(409).json({ error: "Connect your Selloship account first." });
+  res.json({ auto_push: r.selloship_auto_push });
 }));
 
 clientRouter.post("/hosted-sites/:id/selloship/connect", asyncH(async (req, res) => {
@@ -60,9 +74,9 @@ clientRouter.delete("/hosted-sites/:id/selloship/connect", asyncH(async (req, re
   if (!(await ownsSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   await query(
     `update enrollments set selloship_vendor_id=null, selloship_email=null, selloship_store_name=null,
-            selloship_flags=null, selloship_connected_at=null where id=$1`, [req.params.id]
+            selloship_flags=null, selloship_connected_at=null, selloship_auto_push=false where id=$1`, [req.params.id]
   );
-  res.json({ connected: false });
+  res.json({ connected: false, auto_push: false });
 }));
 
 // Book an order's parcels with Selloship. Safe to call twice — parcels already
