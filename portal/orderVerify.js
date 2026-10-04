@@ -21,7 +21,8 @@ export async function verifyOrderPayment(orderId, { utr = null } = {}) {
 
   const items = (await query(`select * from order_items where order_id=$1`, [orderId])).rows;
   const store = (await query(
-    `select id, user_id, payout_mode, gateway_fee_pct, selloship_vendor_id, selloship_auto_push
+    `select id, user_id, payout_mode, gateway_fee_pct,
+            selloship_vendor_id, selloship_auto_push, jd_connected_at, jd_auto_push
        from enrollments where id=$1`, [order.enrollment_id]
   )).rows[0];
   const cfg = await getPlatformConfig();
@@ -85,30 +86,35 @@ export async function verifyOrderPayment(orderId, { utr = null } = {}) {
   // payment. But a silent failure would mean an order that never ships, so the
   // vendor is notified on anything less than a clean booking.
   if (store.selloship_auto_push && store.selloship_vendor_id) {
-    autoBookWithSelloship(order, store.user_id);
+    autoBook("Selloship", "./selloship.js", "pushOrderToSelloship", order, store.user_id);
+  }
+  if (store.jd_auto_push && store.jd_connected_at) {
+    autoBook("JD Web & Ship", "./jdwebship.js", "pushOrderToJd", order, store.user_id);
   }
 
   return { ok: true, split: { wholesalerTotal, retailerShare, platformFee, gatewayFee, held: store.payout_mode === "platform" } };
 }
 
-// Book an auto-push order's parcels, and tell the vendor if anything didn't land.
-// Never throws — the caller is a payment path.
-async function autoBookWithSelloship(order, ownerUserId) {
+// Book an auto-push order's parcels with one carrier, and tell the vendor if
+// anything didn't land. Never throws — the caller is a payment path, and a courier
+// outage must not fail a confirmed payment. A silent failure would mean an order
+// that never ships, so every incomplete booking notifies the store owner.
+async function autoBook(label, module, fnName, order, ownerUserId) {
   try {
-    const { pushOrderToSelloship } = await import("./selloship.js");
-    const r = await pushOrderToSelloship(order.id);
-    console.log("[selloship] auto-push", order.order_no, r);
+    const fn = (await import(module))[fnName];
+    const r = await fn(order.id);
+    console.log(`[${label}] auto-push`, order.order_no, r);
     if (r.failed?.length) {
       await notify({
         user_id: ownerUserId, type: "system",
-        title: `Selloship booked ${r.booked.length} of ${r.booked.length + r.failed.length} parcels for ${order.order_no}. Book the rest from the order page.`,
+        title: `${label} booked ${r.booked.length} of ${r.booked.length + r.failed.length} parcels for ${order.order_no}. Book the rest from the order page.`,
       });
     }
   } catch (e) {
-    console.error("[selloship] auto-push", order.order_no, e.message);
+    console.error(`[${label}] auto-push`, order.order_no, e.message);
     notify({
       user_id: ownerUserId, type: "system",
-      title: `Couldn't book ${order.order_no} with Selloship: ${e.message} — book it manually from the order page.`,
+      title: `Couldn't book ${order.order_no} with ${label}: ${e.message} — book it manually from the order page.`,
     }).catch(() => {});
   }
 }
@@ -128,5 +134,9 @@ export async function refundOrder(orderId) {
   }
   if (entries.length) await withLedger(entries);
   await query(`update orders set payment_status='refunded', status='cancelled', updated_at=now() where id=$1`, [orderId]);
+  // A refund cancels the order, so any JD shipment booked for it must be called off
+  // too — otherwise the courier still delivers a refunded order.
+  import("./jdwebship.js").then(({ cancelOrderAtJd }) => cancelOrderAtJd(orderId))
+    .catch((e) => console.error("[jd] cancel on refund:", e.message));
   return { ok: true };
 }

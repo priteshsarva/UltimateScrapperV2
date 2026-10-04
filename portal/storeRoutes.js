@@ -25,6 +25,7 @@ import { notify as notifyFeed } from "./notifications.js";
 import { createOrder as pay0CreateOrder, checkStatus as pay0CheckStatus } from "./pay0.js";
 import { verifyOrderPayment } from "./orderVerify.js";
 import { computeCheckout, resolveMethod, enabledMethods } from "./checkoutMath.js";
+import { jdStatusLabel } from "./jdwebship.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FOLDER = path.resolve(__dirname, "../databases");
@@ -1338,13 +1339,16 @@ router.get("/:slug/me/orders/:orderNo", resolveStore, identifyCustomer, requireC
   const items = (await query(`select * from order_items where order_id=$1`, [order.id])).rows;
   // Only the leg that ends at the buyer, and never the parcel photos — those are
   // internal payout proof. A rejected proof isn't a shipment the buyer should see.
-  const shipments = (await query(
-    `select courier, tracking_no, tracking_url, created_at from shipments
+  const rawShip = (await query(
+    `select courier, tracking_no, tracking_url, carrier_status, carrier_status_at, created_at from shipments
       where order_id=$1 and leg in ('retailer_to_customer','wholesaler_to_customer')
-        and status <> 'rejected' and (tracking_no is not null or tracking_url is not null)
+        and status <> 'rejected'
+        and (tracking_no is not null or tracking_url is not null or carrier_status is not null)
       order by created_at`,
     [order.id]
   )).rows;
+  // Carriers speak in codes ('ofd', 'rto'); the buyer gets the plain words.
+  const shipments = rawShip.map((s) => ({ ...s, status_label: jdStatusLabel(s.carrier_status) }));
   res.json({ order, items, shipments });
 }));
 

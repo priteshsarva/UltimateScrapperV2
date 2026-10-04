@@ -44,7 +44,7 @@ async function releaseOutstanding(orderId, userIds) {
 const CUSTOMER_LEGS = ["retailer_to_customer", "wholesaler_to_customer"];
 
 // Money still held on the order across all parties (hold - released/refunded).
-async function outstandingHold(orderId) {
+export async function outstandingHold(orderId) {
   const { rows } = await query(
     `select coalesce(sum(amount) filter (where type='hold'),0)
           - coalesce(sum(amount) filter (where type in ('release','refund')),0) as held

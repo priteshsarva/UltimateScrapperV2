@@ -97,6 +97,20 @@ async function emailOrderStatus(orderId, status) {
   } catch (e) { console.error("[order status email]", e.message); }
 }
 
+// Everything that has to happen when an order's status changes, from either the
+// vendor's or the admin's screen. Both call this, so a cancellation can't reach the
+// customer's inbox without also reaching the courier.
+function onOrderStatusChanged(orderId, status) {
+  emailOrderStatus(orderId, status);
+  if (status === "cancelled") {
+    // Fire-and-forget: a courier that is down must not block the status change.
+    import("./jdwebship.js")
+      .then(({ cancelOrderAtJd }) => cancelOrderAtJd(orderId))
+      .then((r) => r?.ok && !r.nothing_to_cancel && console.log("[jd] cancelled shipments for order", orderId))
+      .catch((e) => console.error("[jd] cancel:", e.message));
+  }
+}
+
 // ============================================================ vendor
 
 const clientRouter = Router();
@@ -646,7 +660,8 @@ clientRouter.get("/hosted-sites/:id/orders", asyncH(async (req, res) => {
 clientRouter.get("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const order = (await query(
-    `select o.*, e.payout_mode, (e.selloship_connected_at is not null) as selloship_connected
+    `select o.*, e.payout_mode, (e.selloship_connected_at is not null) as selloship_connected,
+            (e.jd_connected_at is not null) as jd_connected
        from orders o join enrollments e on e.id=o.enrollment_id where o.id=$1 and o.enrollment_id=$2`,
     [req.params.orderId, req.params.id]
   )).rows[0];
@@ -674,7 +689,7 @@ clientRouter.patch("/hosted-sites/:id/orders/:orderId", asyncH(async (req, res) 
     [status, req.params.orderId, req.params.id]
   );
   if (!rowCount) return res.status(404).json({ error: "Order not found" });
-  emailOrderStatus(req.params.orderId, status);
+  onOrderStatusChanged(req.params.orderId, status);
   res.json({ order: rows[0] });
 }));
 
@@ -869,7 +884,7 @@ adminRouter.patch("/orders/:id/status", asyncH(async (req, res) => {
   if (!ORDER_STATUSES.has(status)) return res.status(400).json({ error: "Invalid status" });
   const row = (await query(`update orders set status=$1, updated_at=now() where id=$2 returning id, status`, [status, req.params.id])).rows[0];
   if (!row) return res.status(404).json({ error: "Order not found" });
-  emailOrderStatus(req.params.id, status);
+  onOrderStatusChanged(req.params.id, status);
   res.json({ order: row });
 }));
 

@@ -70,6 +70,7 @@ import uploadRoutes from "./portal/uploadRoutes.js";
 import { walletClientRoutes, walletAdminRoutes } from "./portal/walletRoutes.js";
 import { fulfilmentClientRoutes, fulfilmentAdminRoutes } from "./portal/fulfilmentRoutes.js";
 import { selloshipClientRoutes } from "./portal/selloshipRoutes.js";
+import { jdClientRoutes, jdWebhookRoutes } from "./portal/jdwebshipRoutes.js";
 import { waInternalRoutes, waAdminRoutes } from "./portal/waRoutes.js";
 
 
@@ -241,6 +242,8 @@ app.use("/portal/admin", walletAdminRoutes);             // admin: /portal/admin
 app.use("/portal", fulfilmentClientRoutes);              // vendor: verify-payment, shipments
 app.use("/portal/admin", fulfilmentAdminRoutes);         // admin: verify-payment, shipments approve/release
 app.use("/portal", selloshipClientRoutes);                // vendor: Selloship connect + order push
+app.use("/portal", jdClientRoutes);                       // vendor: JD Web & Ship connect + order push
+app.use("/jd", jdWebhookRoutes);                          // PUBLIC: JD status webhook (per-store token)
 
 startScheduler();
 sweepTmp();                         // clean leftovers from the last run on boot
