@@ -47,7 +47,7 @@ export async function resolveStore(req, res, next) {
   const isCustom = host && !isLocalHost(host) && !isPlatformHost(host) && !isPreviewHost(host);
   if (isCustom) {
     const { rows } = await query(
-      `select id, user_id, slug, status, expiry_date
+      `select id, user_id, slug, status, expiry_date, payment_locked
          from enrollments
         where type = 'hosted' and lower(custom_domain) = $1
           and custom_domain_verified_at is not null`,
@@ -60,7 +60,7 @@ export async function resolveStore(req, res, next) {
   // 2) platform subdomain / preview host / local dev → resolve by the path slug
   if (!enr) {
     const { rows } = await query(
-      `select id, user_id, slug, status, expiry_date
+      `select id, user_id, slug, status, expiry_date, payment_locked
          from enrollments where slug = $1 and type = 'hosted'`,
       [slug]
     );

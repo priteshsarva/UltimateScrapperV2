@@ -181,7 +181,8 @@ clientRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at,
             e.custom_domain, e.custom_domain_verified_at, e.domain_verify_token, e.plan_id,
-            e.payout_mode, e.fulfilment_mode, e.store_gateway,
+            e.payout_mode, e.fulfilment_mode, e.store_gateway, e.payment_locked,
+            s.payment_mode,
             p.name as plan_name, p.limits as plan_limits,
             (p.limits->>'allow_payout_routing')::boolean as allow_payout_routing,
             (p.limits->>'allow_own_gateway')::boolean as allow_own_gateway,
@@ -453,12 +454,19 @@ clientRouter.get("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   res.json({ settings: rows[0] || {} });
 }));
 
-const SETTINGS_FIELDS = ["store_name", "logo_url", "favicon_url", "theme", "whatsapp", "upi_id", "upi_name", "payment_position", "email", "phone",
+const SETTINGS_FIELDS = ["store_name", "logo_url", "favicon_url", "theme", "whatsapp", "upi_id", "upi_name", "payment_position", "payment_mode", "email", "phone",
   "address", "social_urls", "hero", "announcement", "about", "policies", "pricing", "sections", "analytics", "nav", "reviews", "preset", "checkout"];
 const JSONB_FIELDS = new Set(["theme", "address", "social_urls", "hero", "policies", "pricing", "sections", "analytics", "nav", "reviews", "checkout"]);
+// Payment settings the vendor may NOT touch once an admin has locked the store to
+// WhatsApp-only. Enforced server-side so a direct API call can't bypass the UI.
+const PAYMENT_FIELDS = new Set(["upi_id", "upi_name", "payment_position", "payment_mode", "checkout"]);
 
 clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+
+  // Admin-locked stores: drop any payment-field edits before building the update.
+  const locked = (await query(`select payment_locked from enrollments where id=$1`, [req.params.id])).rows[0]?.payment_locked;
+  if (locked && req.body) for (const f of PAYMENT_FIELDS) delete req.body[f];
 
   const params = [req.params.id];
   const sets = [];
@@ -467,7 +475,15 @@ clientRouter.put("/hosted-sites/:id/settings", asyncH(async (req, res) => {
     params.push(JSONB_FIELDS.has(f) ? JSON.stringify(req.body[f]) : req.body[f]);
     sets.push(`${f} = $${params.length}`);
   }
-  if (!sets.length) return res.status(400).json({ error: "No fields to update" });
+  if (!sets.length) {
+    // Locked store: the only fields sent were payment fields we stripped — treat
+    // as a no-op (return current settings) rather than a confusing error.
+    if (locked) {
+      const cur = (await query(`select * from site_settings where enrollment_id=$1`, [req.params.id])).rows[0] || {};
+      return res.json({ settings: cur });
+    }
+    return res.status(400).json({ error: "No fields to update" });
+  }
   sets.push(`updated_at = now()`);
 
   const { rows } = await query(
@@ -702,10 +718,10 @@ adminRouter.use(requireAuth, requireAdmin);
 adminRouter.get("/hosted-sites", asyncH(async (req, res) => {
   const { rows } = await query(
     `select e.id, e.slug, e.status, e.expiry_date, e.created_at, u.email as owner_email,
-            e.custom_domain, e.custom_domain_verified_at, e.payout_mode, e.gateway_fee_pct, e.store_gateway,
+            e.custom_domain, e.custom_domain_verified_at, e.payout_mode, e.gateway_fee_pct, e.store_gateway, e.payment_locked,
             e.plan_id, p.name as plan_name, p.price as plan_price,
             (exists (select 1 from enrollment_sources es where es.enrollment_id=e.id and es.source_id like 'ws_%')) as has_wholesale,
-            s.store_name, s.logo_url,
+            s.store_name, s.logo_url, s.payment_mode,
             (select count(*) from orders o where o.enrollment_id = e.id) as order_count
        from enrollments e
        join users u on u.id = e.user_id
@@ -808,6 +824,19 @@ adminRouter.patch("/hosted-sites/:id", asyncH(async (req, res) => {
   );
   if (!rowCount) return res.status(404).json({ error: "Site not found" });
   res.json({ site: rows[0] });
+}));
+
+// PATCH /portal/admin/hosted-sites/:id/payment-lock  { locked }
+// Superadmin force-switch: lock the store to WhatsApp-only selling AND freeze the
+// vendor's payment settings (they can't change it back). Unlock hands control back.
+adminRouter.patch("/hosted-sites/:id/payment-lock", asyncH(async (req, res) => {
+  const locked = !!req.body?.locked;
+  const { rowCount } = await query(
+    `update enrollments set payment_locked=$1 where id=$2 and type='hosted'`,
+    [locked, req.params.id]
+  );
+  if (!rowCount) return res.status(404).json({ error: "Site not found" });
+  res.json({ ok: true, payment_locked: locked });
 }));
 
 // DELETE /portal/admin/hosted-sites/:id  -> permanently remove a site (rejected

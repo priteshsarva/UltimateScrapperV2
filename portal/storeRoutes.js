@@ -350,18 +350,23 @@ router.get("/:slug/config", resolveStore, asyncH(async (req, res) => {
   // always goes to the store's WhatsApp either way.
   const enrRow = (await query(`select payout_mode, store_gateway from enrollments where id=$1`, [enr.id])).rows[0] || {};
   const payoutMode = enrRow.payout_mode || "platform";
-  const platformUpi = payoutMode === "platform" ? await getPlatformUpi() : null;
-  // Effective collector: 'pay0' only when the site is set to it AND Pay0 is
-  // actually configured; otherwise fall back to the manual UPI/WhatsApp flow.
+  // WhatsApp-only: the admin forced it (enr.payment_locked), or the vendor chose
+  // it (site.payment_mode). No online collection — buyer finalises on WhatsApp.
+  const whatsappOnly = !!enr.payment_locked || site.payment_mode === "whatsapp";
+  const platformUpi = (!whatsappOnly && payoutMode === "platform") ? await getPlatformUpi() : null;
+  // Effective collector: 'whatsapp' wins; else 'pay0' only when the site is set to
+  // it AND Pay0 is actually configured; otherwise the manual UPI/WhatsApp flow.
   let method = "upi";
-  if ((enrRow.store_gateway || "pay0") === "pay0") {
+  if (whatsappOnly) method = "whatsapp";
+  else if ((enrRow.store_gateway || "pay0") === "pay0") {
     try { if ((await getActiveProvider()).enabled) method = "pay0"; } catch { /* stay upi */ }
   }
   const payment = {
     mode: payoutMode,
     method,
-    upi_id: payoutMode === "platform" ? (platformUpi.upi_id || null) : (site.upi_id || null),
-    upi_name: payoutMode === "platform" ? (platformUpi.upi_name || null) : (site.upi_name || null),
+    // No UPI in WhatsApp-only mode, so the storefront shows no pay step anywhere.
+    upi_id: whatsappOnly ? null : (payoutMode === "platform" ? (platformUpi.upi_id || null) : (site.upi_id || null)),
+    upi_name: whatsappOnly ? null : (payoutMode === "platform" ? (platformUpi.upi_name || null) : (site.upi_name || null)),
     whatsapp: site.whatsapp || null,
   };
   const dbRows = (await query(
@@ -1112,8 +1117,12 @@ router.post("/:slug/orders", resolveStore, identifyCustomer, asyncH(async (req, 
   const subtotal = round2(lineItems.reduce((s, li) => s + li.line_total, 0));
   // Payment method (prepaid / cod / semicod) + the money split, from the vendor's
   // checkout config. resolveMethod guards against a disabled or unknown method.
-  const checkoutCfg = site.checkout || {};
-  const pay = computeCheckout(subtotal, resolveMethod(req.body?.payment_method, checkoutCfg), checkoutCfg);
+  // WhatsApp-only stores collect nothing online here, so no COD fee / prepaid
+  // discount applies — the order is a plain subtotal handed off to WhatsApp.
+  const whatsappOnly = !!enr.payment_locked || site.payment_mode === "whatsapp";
+  const checkoutCfg = whatsappOnly ? {} : (site.checkout || {});
+  const method = whatsappOnly ? "prepaid" : resolveMethod(req.body?.payment_method, checkoutCfg);
+  const pay = computeCheckout(subtotal, method, checkoutCfg);
 
   const client = await pool.connect();
   try {
