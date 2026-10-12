@@ -36,6 +36,7 @@ import adminRoutes from "./portal/adminRoutes.js";
 import sourceRoutes from "./portal/sourceRoutes.js";
 import { nextSourceToScrape } from './portal/sources.js';
 import { enqueueScrape, scrapeState } from './portal/scrapeQueue.js';
+import { refreshStaleInStock } from './core/refreshStale.js';
 import { scrapeRequestRoutes, adminScrapeRequestRoutes } from "./portal/scrapeRequestRoutes.js";
 import { sourceCategoryRoutes, adminSourceCategoryRoutes } from "./portal/categoryRoutes.js";
 import enrollmentSourceRoutes from "./portal/enrollmentSourceRoutes.js";
@@ -401,6 +402,44 @@ app.get('/devproductupdates', async (req, res) => {
     }
 
 })
+
+// Live-refresh every IN-STOCK product that hasn't been updated in the last X
+// days. Each one is re-scraped through the same live path as /product/refresh-one,
+// which flips availability -> 0 on a 404 / dead page. Fire-and-forget like
+// /devproductupdates: responds immediately, runs in the background, git-commits
+// the DB changes at the end.
+//   GET /refreshstale?days=5             -> all category DBs, in-stock, >5 days old
+//   GET /refreshstale?days=5&category=watches&limit=200
+app.get('/refreshstale', async (req, res) => {
+    const days = req.query.days;
+    if (days === undefined || !Number.isFinite(parseFloat(days)) || parseFloat(days) < 0) {
+        return res.status(400).json({ status: 400, message: "Pass ?days=X — refresh in-stock products not updated in the last X days." });
+    }
+    if (scrapeState.batchRunning) {
+        return res.status(409).json({ status: 409, message: "A scrape batch is already running. Try again once it finishes." });
+    }
+    const limit = req.query.limit;
+    const category = req.query.category || null;
+    const cap = Math.max(1, parseInt(limit, 10) || 500);
+
+    res.status(200).json({
+        status: 200,
+        message: `Live-refreshing in-stock products older than ${parseFloat(days)} day(s)` +
+            `${category ? ` in '${category}'` : " across all categories"} (max ${cap}). Running in the background.`,
+    });
+
+    // Guard against overlapping with the rotator batch (both write the same DBs).
+    scrapeState.batchRunning = true;
+    try {
+        const summary = await refreshStaleInStock({ days, limit: cap, category, log: (m) => console.log(m) });
+        console.log("✅ [refresh-stale] DONE:", JSON.stringify(summary));
+        gitAutoCommitAndPush();
+    } catch (e) {
+        console.error("❌ [refresh-stale] FAILED:", e.message);
+    } finally {
+        scrapeState.batchRunning = false;
+    }
+});
 
 app.use('/dev', tenantIdentify, devRoutes)
 
