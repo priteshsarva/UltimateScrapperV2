@@ -298,6 +298,7 @@ async function computeSiteAnalytics(enrollmentId, from, to) {
   kpis.conversion_rate = sessions ? +((kpis.orders / sessions) * 100).toFixed(2) : 0;
 
   const funnel = {
+    impression: evCount("impression"),
     view_item: evCount("view_item"),
     add_to_cart: evCount("add_to_cart"),
     begin_checkout: evCount("begin_checkout"),
@@ -344,7 +345,98 @@ async function computeSiteAnalytics(enrollmentId, from, to) {
       group by 1 order by n desc limit 15`, P
   )).rows;
 
-  return { range: { from, to }, kpis, funnel, series, status_breakdown, top_products, top_searches };
+  // --- detailed behaviour rollups ---
+  // Most-visited pages (which links users went to).
+  const top_pages = (await query(
+    `select path, count(*)::int as views, count(distinct session_id)::int as visitors
+       from store_events
+      where ${scope("enrollment_id")} and event='page_view' and ${inRange("created_at")}
+        and coalesce(path,'') <> ''
+      group by path order by views desc limit 15`, P
+  )).rows;
+  // Most-clicked things (which buttons/links users clicked).
+  const top_clicks = (await query(
+    `select trim(meta->>'label') as label, count(*)::int as n
+       from store_events
+      where ${scope("enrollment_id")} and event='click' and ${inRange("created_at")}
+        and coalesce(trim(meta->>'label'),'') <> ''
+      group by 1 order by n desc limit 15`, P
+  )).rows;
+  // Most-shown products (impressions), deduped per session.
+  const top_impressions = (await query(
+    `select product_id, db_name, max(meta->>'name') as name, count(distinct session_id)::int as impressions
+       from store_events
+      where ${scope("enrollment_id")} and event='impression' and ${inRange("created_at")}
+        and product_id is not null
+      group by product_id, db_name order by impressions desc limit 15`, P
+  )).rows;
+  // Engagement: avg session length, bounce rate (single-page sessions), avg time on page.
+  const eng = (await query(
+    `with s as (
+       select session_id,
+              extract(epoch from (max(created_at) - min(created_at)))::int as dur,
+              count(*) filter (where event='page_view')::int as pv
+         from store_events
+        where ${scope("enrollment_id")} and ${inRange("created_at")} and session_id is not null
+        group by session_id)
+     select coalesce(round(avg(dur))::int,0) as avg_session_sec,
+            coalesce(round(100.0*count(*) filter (where pv<=1)/nullif(count(*),0))::int,0) as bounce_pct
+       from s`, P
+  )).rows[0] || {};
+  const tope = (await query(
+    `select coalesce(round(avg((meta->>'duration_ms')::numeric)/1000)::int,0) as avg_page_sec
+       from store_events
+      where ${scope("enrollment_id")} and event='page_leave' and ${inRange("created_at")}
+        and (meta->>'duration_ms') ~ '^[0-9]+$'`, P
+  )).rows[0] || {};
+  const engagement = {
+    avg_session_sec: eng.avg_session_sec || 0,
+    bounce_pct: eng.bounce_pct || 0,
+    avg_page_sec: tope.avg_page_sec || 0,
+  };
+
+  return {
+    range: { from, to }, kpis, funnel, series, status_breakdown, top_products, top_searches,
+    top_pages, top_clicks, top_impressions, engagement,
+  };
+}
+
+// --- visitor session explorer (per-visitor click-by-click timeline) ---
+// Recent sessions with their shape: when, how long, how many events/clicks,
+// where they landed. One row per anonymous session (tab).
+async function listSessions(enrollmentId, from, to, limit = 60) {
+  const { rows } = await query(
+    `with ev as (
+       select session_id, event, path, created_at,
+              row_number() over (partition by session_id order by created_at) as rn
+         from store_events
+        where enrollment_id=$1 and session_id is not null
+          and created_at >= $2::date and created_at < ($3::date + 1))
+     select session_id,
+            min(created_at) as started_at,
+            max(created_at) as last_at,
+            extract(epoch from (max(created_at)-min(created_at)))::int as duration_sec,
+            count(*)::int as events,
+            count(*) filter (where event='page_view')::int as pageviews,
+            count(*) filter (where event='click')::int as clicks,
+            bool_or(event='purchase') as converted,
+            max(path) filter (where rn=1) as entry_path
+       from ev group by session_id
+      order by started_at desc limit $4`,
+    [enrollmentId, from, to, limit]
+  );
+  return rows;
+}
+// The full ordered event stream for one session.
+async function sessionTimeline(enrollmentId, sid, limit = 500) {
+  const { rows } = await query(
+    `select event, path, product_id, db_name, value, meta, created_at
+       from store_events
+      where enrollment_id=$1 and session_id=$2
+      order by created_at asc limit $3`,
+    [enrollmentId, String(sid), limit]
+  );
+  return rows;
 }
 
 // GET /portal/hosted-sites/:id/analytics?from=&to=  -> one store's report (owner).
@@ -352,6 +444,17 @@ clientRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
   if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
   const { from, to } = analyticsRange(req.query);
   res.json(await computeSiteAnalytics(req.params.id, from, to));
+}));
+
+// Owner: recent visitor sessions + one session's timeline.
+clientRouter.get("/hosted-sites/:id/sessions", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  const { from, to } = analyticsRange(req.query);
+  res.json({ sessions: await listSessions(req.params.id, from, to) });
+}));
+clientRouter.get("/hosted-sites/:id/sessions/:sid", asyncH(async (req, res) => {
+  if (!(await ownedSite(req.params.id, req.user.sub))) return res.status(404).json({ error: "Site not found" });
+  res.json({ events: await sessionTimeline(req.params.id, req.params.sid) });
 }));
 
 // PUT /portal/hosted-sites/:id/custom-domain  { domain: 'aquawatch.com' | '' }
@@ -767,6 +870,15 @@ adminRouter.get("/analytics", asyncH(async (req, res) => {
 adminRouter.get("/hosted-sites/:id/analytics", asyncH(async (req, res) => {
   const { from, to } = analyticsRange(req.query);
   res.json(await computeSiteAnalytics(req.params.id, from, to));
+}));
+
+// Admin: recent visitor sessions + one session's click-by-click timeline (any store).
+adminRouter.get("/hosted-sites/:id/sessions", asyncH(async (req, res) => {
+  const { from, to } = analyticsRange(req.query);
+  res.json({ sessions: await listSessions(req.params.id, from, to) });
+}));
+adminRouter.get("/hosted-sites/:id/sessions/:sid", asyncH(async (req, res) => {
+  res.json({ events: await sessionTimeline(req.params.id, req.params.sid) });
 }));
 
 // Shared token-verification so an admin OR the owning vendor can verify a
