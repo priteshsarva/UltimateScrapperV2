@@ -334,7 +334,17 @@ async function computeSiteAnalytics(enrollmentId, from, to) {
       group by oi.product_id, oi.db_name order by revenue desc limit 15`, P
   )).rows;
 
-  return { range: { from, to }, kpis, funnel, series, status_breakdown, top_products };
+  // What shoppers searched for (behaviour) — the query is stored in the event's
+  // meta.q by the storefront search box.
+  const top_searches = (await query(
+    `select lower(trim(meta->>'q')) as q, count(*)::int as n
+       from store_events
+      where ${scope("enrollment_id")} and event='search' and ${inRange("created_at")}
+        and coalesce(trim(meta->>'q'),'') <> ''
+      group by 1 order by n desc limit 15`, P
+  )).rows;
+
+  return { range: { from, to }, kpis, funnel, series, status_breakdown, top_products, top_searches };
 }
 
 // GET /portal/hosted-sites/:id/analytics?from=&to=  -> one store's report (owner).
