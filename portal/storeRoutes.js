@@ -447,11 +447,13 @@ router.post("/:slug/preview-unlock", resolveStore, asyncH(async (req, res) => {
 }));
 
 // POST /:slug/track  { event, product_id?, db_name?, value?, session_id?, meta? }
-// First-party analytics beacon. Fire-and-forget from the storefront. Only live
-// stores are recorded — preview views would skew a vendor's numbers.
+// First-party analytics beacon. Fire-and-forget from the storefront. Records for
+// any UNLOCKED store — live, or a demo/draft store being previewed with a valid
+// preview token — so the admin sees traffic on demo sites too. resolveStore has
+// already 401'd anyone without access, so reaching here means the store is viewable.
 const TRACK_EVENTS = new Set(["page_view", "view_item", "add_to_cart", "begin_checkout", "search", "purchase"]);
 router.post("/:slug/track", resolveStore, asyncH(async (req, res) => {
-  if (!req.storeIsLive) return res.json({ ok: true, skipped: true });
+  if (!req.storeUnlocked) return res.json({ ok: true, skipped: true });
   const { event, product_id, db_name, value, session_id, meta } = req.body || {};
   if (!TRACK_EVENTS.has(event)) return res.status(400).json({ error: "unknown event" });
   await query(
