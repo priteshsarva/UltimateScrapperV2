@@ -451,20 +451,64 @@ router.post("/:slug/preview-unlock", resolveStore, asyncH(async (req, res) => {
 // any UNLOCKED store — live, or a demo/draft store being previewed with a valid
 // preview token — so the admin sees traffic on demo sites too. resolveStore has
 // already 401'd anyone without access, so reaching here means the store is viewable.
-const TRACK_EVENTS = new Set(["page_view", "view_item", "add_to_cart", "begin_checkout", "search", "purchase"]);
+const TRACK_EVENTS = new Set([
+  "page_view", "page_leave", "click", "impression",
+  "view_item", "add_to_cart", "begin_checkout", "search", "purchase",
+]);
+const MAX_BATCH = 100;
+// Clamp a client timestamp into a sane window so clock skew / tampering can't
+// write far-future or ancient rows; falls back to "now".
+function clampTs(t) {
+  const n = Number(t), now = Date.now();
+  const ms = Number.isFinite(n) ? Math.min(now + 5 * 60000, Math.max(now - 24 * 3600000, n)) : now;
+  return new Date(ms).toISOString();
+}
+function cleanEvent(e) {
+  if (!e || !TRACK_EVENTS.has(e.event)) return null;
+  return {
+    event: e.event,
+    product_id: e.product_id ? String(e.product_id).slice(0, 64) : null,
+    db_name: e.db_name ? String(e.db_name).slice(0, 64) : null,
+    value: Number(e.value) || null,
+    meta: e.meta && typeof e.meta === "object" ? e.meta : {},
+    path: e.path ? String(e.path).slice(0, 300) : null,
+    created_at: clampTs(e.t),
+  };
+}
+
 router.post("/:slug/track", resolveStore, asyncH(async (req, res) => {
   if (!req.storeUnlocked) return res.json({ ok: true, skipped: true });
-  const { event, product_id, db_name, value, session_id, meta } = req.body || {};
+  const { event, product_id, db_name, value, session_id, meta, path } = req.body || {};
   if (!TRACK_EVENTS.has(event)) return res.status(400).json({ error: "unknown event" });
   await query(
-    `insert into store_events (enrollment_id, event, product_id, db_name, value, session_id, meta)
-     values ($1,$2,$3,$4,$5,$6,$7)`,
+    `insert into store_events (enrollment_id, event, product_id, db_name, value, session_id, meta, path)
+     values ($1,$2,$3,$4,$5,$6,$7,$8)`,
     [req.storeEnrollment.id, event, product_id ? String(product_id).slice(0, 64) : null,
      db_name ? String(db_name).slice(0, 64) : null, Number(value) || null,
      session_id ? String(session_id).slice(0, 64) : null,
-     meta && typeof meta === "object" ? meta : {}]
+     meta && typeof meta === "object" ? meta : {}, path ? String(path).slice(0, 300) : null]
   );
   res.json({ ok: true });
+}));
+
+// POST /:slug/track-batch  { session_id, events:[{event,product_id,db_name,value,meta,path,t}] }
+// Bulk-ingest a batch of behaviour events in ONE insert. The storefront queues
+// events and flushes here (keepalive fetch) every few seconds and on tab-hide, so
+// detailed click + impression tracking stays cheap: one request, one insert.
+router.post("/:slug/track-batch", resolveStore, asyncH(async (req, res) => {
+  if (!req.storeUnlocked) return res.json({ ok: true, skipped: true });
+  const sid = req.body?.session_id ? String(req.body.session_id).slice(0, 64) : null;
+  const raw = Array.isArray(req.body?.events) ? req.body.events.slice(0, MAX_BATCH) : [];
+  const rows = raw.map(cleanEvent).filter(Boolean);
+  if (!rows.length) return res.json({ ok: true, inserted: 0 });
+  await query(
+    `insert into store_events (enrollment_id, event, product_id, db_name, value, session_id, meta, path, created_at)
+     select $1, e.event, e.product_id, e.db_name, e.value, $2, e.meta, e.path, e.created_at
+       from jsonb_to_recordset($3::jsonb) as e(
+         event text, product_id text, db_name text, value numeric, meta jsonb, path text, created_at timestamptz)`,
+    [req.storeEnrollment.id, sid, JSON.stringify(rows)]
+  );
+  res.json({ ok: true, inserted: rows.length });
 }));
 
 // ============================================================ products
