@@ -22,3 +22,5 @@
 /authntic-firebase-adminsdk-fbsvc-e4867a9f8b.json
 *firebase-adminsdk*.json
 .env
+
+daily-run.ps1
