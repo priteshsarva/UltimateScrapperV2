@@ -1,0 +1,10 @@
+🧊 TMPDIR -> C:\Users\eakir\Documents\node\UltimateScrapperV2\.tmp (Chrome profiles off the tmpfs /tmp)
+[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30; wholesale maintenance at 08:15; Selloship tracking hourly
+Server is running on port 3002
+ticktock
+
+🔄 [ROTATOR] Scraping: Watch Kart (watchkart)
+[DB Manager] Connected: watches.db
+🚀 METHOD_C → Watch Kart
+🚀 [methodC] crawl https://watchkart.cartpe.in
+✅ Changes staged.
