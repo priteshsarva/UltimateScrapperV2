@@ -1,0 +1,50 @@
+🧊 TMPDIR -> C:\Users\eakir\Documents\node\UltimateScrapperV2\.tmp (Chrome profiles off the tmpfs /tmp)
+[billing] daily scheduler armed for 08:00; hosted expiry at 08/14/20; catalogue scan at 07:30; wholesale maintenance at 08:15; Selloship tracking hourly
+Server is running on port 3002
+[scan] startup {
+  categories: 647,
+  brands: { scanned: 13588, new: 0, unmapped: 0, firstRun: false }
+}
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[hosted] expiry tick { reminders: 0, paused: 0, notified: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[hosted] expiry tick { reminders: 0, paused: 0, notified: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[storefront-img] purge { checked: 5, old: 5, deleted: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[scan] daily {
+  categories: 647,
+  brands: { scanned: 13588, new: 0, unmapped: 0, firstRun: false }
+}
+[hosted] expiry tick { reminders: 0, paused: 0, notified: 0 }
+[billing] tick { renewals: 0, reminders: 0, expired: 0 }
+[wholesale] purge { shipments: 0, photos_deleted: 0 }
+[DB Manager] Connected: wholesale.db
+[wholesale] reverify { flagged: null, days: 30 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[unpaid-order] tick { sent: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+[selloship] track { checked: 0, updated: 0, pending: 0 }
+ticktock
+
+🔄 [ROTATOR] Scraping: Classicalwrist (classicalwrist)
+[DB Manager] Connected: watches.db
+🚀 METHOD_C → Classicalwrist
+🚀 [methodC] crawl https://classicalwrist.sellodev.com
+✅ Changes staged.
